@@ -1,0 +1,69 @@
+# LiteLLM AI Gateway - OpenRouter (GELISMIS modeller, PRIMARY) + DeepSeek (dogrudan, fallback)
+# Tek ucurum: tum servisler http://localhost:4000'e baglanir.
+model_list:
+  # --- OpenRouter GELISMIS (PRIMARY - gelismis modeller) ---
+  - model_name: claude-sonnet-5            # frontier genel/yaratici (1M ctx)
+    litellm_params:
+      model: openrouter/anthropic/claude-sonnet-5
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: gpt-5.6-luna               # frontier genel (1.05M ctx)
+    litellm_params:
+      model: openrouter/openai/gpt-5.6-luna
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: deepseek-v3.2              # akil yurutme / psikolojik profil (163k ctx)
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v3.2
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: qwen3-max                  # open-weights frontier (262k ctx)
+    litellm_params:
+      model: openrouter/qwen/qwen3-max
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: glm-4.6v                   # vision (gorsel isleme)
+    litellm_params:
+      model: openrouter/z-ai/glm-4.6v
+      api_key: os.environ/OPENROUTER_API_KEY
+  # --- DeepSeek dogrudan (FALLBACK - ucuz + bakiyeli hesap) ---
+  - model_name: deepseek-chat
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+  - model_name: deepseek-reasoner
+    litellm_params:
+      model: deepseek/deepseek-reasoner
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # --- ultra ucuz toplu is + eski vision fallback ---
+  - model_name: llama-3.3-70b
+    litellm_params:
+      model: openrouter/meta-llama/llama-3.3-70b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: qwen3-vl-8b
+    litellm_params:
+      model: openrouter/qwen/qwen3-vl-8b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openrouter/openai/gpt-4o-mini
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: sonar-pro-search          # yerlesik web aramali (Perplexity Sonar)
+    litellm_params:
+      model: openrouter/perplexity/sonar-pro-search
+      api_key: os.environ/OPENROUTER_API_KEY
+router_settings:
+  fallbacks:
+    - claude-sonnet-5:
+        - gpt-5.6-luna
+        - deepseek-chat
+    - gpt-5.6-luna:
+        - claude-sonnet-5
+        - deepseek-chat
+    - deepseek-v3.2:
+        - qwen3-max
+        - deepseek-reasoner
+    - qwen3-max:
+        - deepseek-v3.2
+        - deepseek-chat
+    - glm-4.6v:
+        - qwen3-vl-8b
+        - gpt-4o-mini
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

@@ -1,0 +1,73 @@
+# ===========================================================================
+# DijitalVarlik — .gitignore
+# ===========================================================================
+
+# Gercek ortam dosyalari (ASLA commit etme)
+.env
+*.env
+!.env.example
+
+# Python sanal ortamlar
+.venv/
+venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Uygulama veri dosyalari (kisisel veri, oturum, cache)
+agent_core/data/*.json
+agent_core/current_mission_brief.json
+cockpit/memory.json
+cockpit/skills.json
+cockpit/personality.json
+
+# Log dosyalari
+*.log
+*.out.log
+*.err.log
+gateway_stdout.log
+gateway_stderr.log
+server.log
+server_stderr.log
+server_stdout.log
+
+# Playwright tarayici cache
+.playwright/
+ms-playwright/
+
+# Node (gelecekte eklenir)
+node_modules/
+package-lock.json
+
+# Python egg/dist
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OpenHands calisma alani meta verileri
+.openhands/
+
+# PDF ve buyuk dokuman dosyalari (kaynak kod degil)
+*.pdf
+
+# Scraper onbellek
+agent_core/data/scraped_profiles.json
+
+cockpit/third_party/UI-TARS-desktop/
+cockpit/third_party/agent-zero/
+cockpit/third_party/deer-flow/

@@ -1,0 +1,70 @@
+# Kapalı devre servislerini ayağa kaldırır.
+# Her servis kendi reposunun resmi başlatma dokümanına göre konfigüre edilir;
+# build bağlamları agent_core'a indirilen (veya klonlanan) repo dizinlerini gösterir.
+#
+# NOT:
+#  - agent-zero  : önce kendi reposunda `python prepare.py` + model anahtarlarını
+#                  .env'e gir, MCP_SERVER_TOKEN'i AGENT_ZERO_API_KEY'e kopyala.
+#  - deer-flow   : model endpoint'ini backend config'inde tanımla.
+#  - eliza       : karakter dosyası + model provider anahtarları gerekir.
+#  - uitars      : GPU + UI-TARS model servisi ayrı başlatılır (örnek komut
+#                  .env.example içinde).
+version: "3.9"
+
+services:
+  agent-zero:
+    build: ./third_party/agent-zero
+    container_name: az-orchestrator
+    environment:
+      - MCP_SERVER_TOKEN=${AGENT_ZERO_API_KEY:?AGENT_ZERO_API_KEY gerekli}
+      - WEB_UI_PORT=5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - agent_zero_data:/app/agent-zero/usr
+
+  deerflow:
+    build: ./third_party/deer-flow
+    container_name: deerflow-gateway
+    ports:
+      - "8080:8080"
+    volumes:
+      - deerflow_data:/data
+    environment:
+      - DEERFLOW_MODEL_ENDPOINT=${DEERFLOW_MODEL_ENDPOINT:-}
+
+  eliza:
+    image: elizaos/eliza:latest
+    container_name: eliza-agent
+    ports:
+      - "3000:3000"
+    environment:
+      - ELIZA_AGENT_ID=${ELIZA_AGENT_ID:-agent}
+      - ELIZA_TOKEN=${ELIZA_TOKEN:-}
+    volumes:
+      - eliza_data:/app/agent/data
+
+  agent-core:
+    build: .
+    container_name: agent-core
+    depends_on:
+      - agent-zero
+      - deerflow
+      - eliza
+    environment:
+      - AGENT_ZERO_URL=http://agent-zero:5000
+      - AGENT_ZERO_API_KEY=${AGENT_ZERO_API_KEY}
+      - DEERFLOW_URL=http://deerflow:8080
+      - ELIZA_URL=http://eliza:3000
+      - SESSION_STORE_KEY=${SESSION_STORE_KEY:?SESSION_STORE_KEY gerekli}
+      - UITARS_REMOTE_ENDPOINT=${UITARS_REMOTE_ENDPOINT:-}
+    ports:
+      - "5060:5060"
+    volumes:
+      - agent_core_data:/app/data
+
+volumes:
+  agent_zero_data:
+  deerflow_data:
+  eliza_data:
+  agent_core_data:

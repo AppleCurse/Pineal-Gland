@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ajan Kokpiti</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #12161f;
+    --panel2: #1a202c;
+    --border: #232b3a;
+    --text: #e6e9f0;
+    --muted: #8a93a6;
+    --accent: #f5c542;
+    --green: #3ddc84;
+    --red: #ff5c5c;
+    --blue: #4aa3ff;
+  }
+  /* ---- Handover Overlay ---- */
+  #handoverOverlay {
+    display: none;
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(0,0,0,0.82);
+    align-items: center; justify-content: center;
+  }
+  #handoverOverlay.visible { display: flex; }
+  #handoverCard {
+    background: #1a0505;
+    border: 3px solid var(--red);
+    border-radius: 18px;
+    padding: 32px 40px;
+    max-width: 520px; width: 90%;
+    animation: flashBorder 0.7s infinite alternate;
+    text-align: center;
+  }
+  @keyframes flashBorder {
+    from { border-color: #ff2222; box-shadow: 0 0 24px #ff2222aa; }
+    to   { border-color: #ff8888; box-shadow: 0 0 8px #ff222244; }
+  }
+  #handoverCard h2 { color: var(--red); font-size: 22px; margin-bottom: 16px; letter-spacing:1px; }
+  #handoverCard .hrow { text-align:left; margin: 8px 0; font-size:14px; }
+  #handoverCard .hrow b { color: var(--accent); }
+  #handoverCard .hscore { font-family: monospace; color: var(--green); font-size: 16px; margin:12px 0; }
+  #handoverCard .hhistory {
+    background: var(--panel2); border-radius: 10px;
+    padding: 10px; margin-top: 12px;
+    max-height: 160px; overflow-y: auto;
+    text-align: left; font-size: 12px; color: var(--muted);
+  }
+  #handoverCard .hbtns { display:flex; gap:12px; margin-top:18px; justify-content:center; }
+  #handoverCard .hbtns button {
+    padding: 10px 22px; border-radius: 10px; border: none;
+    font-size: 14px; font-weight: 700; cursor: pointer;
+  }
+  #handoverCard .hbtns .accept { background: var(--green); color: #000; }
+  #handoverCard .hbtns .dismiss { background: var(--panel2); color: var(--text); border: 1px solid var(--border); }
+  /* ---- Mission Brief Kart ---- */
+  .mission-brief-card {
+    background: linear-gradient(135deg, #0d1a2e 0%, #12202f 100%);
+    border: 1px solid var(--blue);
+    border-radius: 12px;
+    padding: 14px;
+    margin: 8px 0;
+    font-size: 12px;
+    animation: slideIn 0.3s ease;
+  }
+  @keyframes slideIn { from { opacity:0; transform: translateY(-8px); } to { opacity:1; transform: none; } }
+  .mission-brief-card .mb-title { color: var(--blue); font-weight:700; font-size:13px; margin-bottom:8px; }
+  .mission-brief-card .mb-row { margin: 5px 0; }
+  .mission-brief-card .mb-row b { color: var(--accent); }
+  .mission-brief-card .mb-chips { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px; }
+  .mission-brief-card .chip {
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 2px 10px; font-size: 11px; color: var(--text);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  /* ---- Üst bar ---- */
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 9px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header .title { font-weight: 700; font-size: 16px; letter-spacing: .5px; white-space: nowrap; }
+  header .title span { color: var(--accent); }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: 999px; font-size: 12px;
+    background: var(--panel2); border: 1px solid var(--border); white-space: nowrap;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); }
+  .dot.off { background: var(--muted); }
+  .dot.busy { background: var(--accent); animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .4; } }
+  .page-url {
+    flex: 1; text-align: right; font-size: 11px; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* ---- Beceri kutuları (üst) ---- */
+  #skills {
+    display: flex; gap: 8px; padding: 9px 16px; flex-wrap: wrap;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  .skill {
+    display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+    cursor: pointer; user-select: none; transition: all .15s; font-size: 13px;
+  }
+  .skill:hover { border-color: var(--accent); }
+  .skill.off { opacity: .4; }
+  .skill .s-icon { font-size: 15px; }
+  .skill .s-name { font-weight: 600; }
+  .skill .s-state { font-size: 10px; color: var(--muted); }
+  /* ---- Orta ---- */
+  main { flex: 1; display: grid; grid-template-columns: 1.7fr 1fr; gap: 10px; padding: 10px 16px; min-height: 0; }
+  #mirror {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  #mirror .bar {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); flex-wrap: wrap;
+  }
+  #mirror .bar .rec { color: var(--red); font-weight: 700; }
+  #urlInput {
+    flex: 1; min-width: 120px; background: var(--panel2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px; padding: 6px 10px; font-size: 12px;
+  }
+  .btn {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+  #mirror .screen {
+    flex: 1; min-height: 0; background: #07090d; position: relative;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #mirrorImg {
+    width: 100%; height: 100%; object-fit: contain; display: none;
+  }
+  #screenPlaceholder { color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
+  #mirror .activity { padding: 8px 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+  /* ---- Yan panel ---- */
+  #side { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+  .card h3 { font-size: 13px; color: var(--accent); margin-bottom: 8px; }
+  .card label { display: block; font-size: 11px; color: var(--muted); margin: 8px 0 3px; }
+  .card textarea, .card input, .card select {
+    width: 100%; background: var(--panel2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px; padding: 7px; font-size: 12px;
+    font-family: inherit; resize: vertical;
+  }
+  .card button {
+    margin-top: 8px; background: var(--blue); color: #fff; border: none;
+    border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .memory-item { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
+  .memory-item button { background: transparent; border: none; color: var(--red); cursor: pointer; font-size: 12px; margin: 0; padding: 0 4px; }
+  #log { max-height: 130px; overflow-y: auto; font-size: 11px; color: var(--muted); }
+  #log div { padding: 2px 0; border-bottom: 1px solid #ffffff08; }
+  /* ---- Alt: sohbet ---- */
+  #chat {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    display: flex; flex-direction: column; min-height: 200px; max-height: 32vh;
+  }
+  #chat .messages { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 80%; padding: 8px 12px; border-radius: 12px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  .msg.m { background: #1e2a44; align-self: flex-end; border-bottom-right-radius: 4px; }
+  .msg.a { background: var(--panel2); align-self: flex-start; border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .msg .who { font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+  #chat .input-row { display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); }
+  #chat .input-row input {
+    flex: 1; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 10px; padding: 10px 12px; font-size: 14px;
+  }
+  #chat .input-row button { background: var(--accent); color: #111; border: none; border-radius: 10px; padding: 0 18px; font-weight: 700; cursor: pointer; }
+</style>
+</head>
+<body>
+  <!-- ÜST BAR -->
+  <header>
+    <div class="title">🛸 <span>AJAN KOKPİTİ</span></div>
+    <div class="status-pill"><span class="dot" id="dot"></span><span id="statusText">Bağlanıyor...</span></div>
+    <div class="page-url" id="pageUrl">—</div>
+    <div style="display:flex;gap:6px">
+      <input id="radarText" placeholder="/radar niyet | tetikleyici | ele" style="width:280px;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:12px" />
+      <button class="btn primary" onclick="sendRadar()">🎯 RADAR</button>
+    </div>
+  </header>
+
+  <!-- BECERİ KUTULARI -->
+  <div id="skills"></div>
+
+  <main>
+    <!-- ORTA: CANLI TARAYICI AYNASI -->
+    <section id="mirror">
+      <div class="bar">
+        <span class="rec">● CANLI</span>
+        <input id="urlInput" placeholder="https://..." value="https://example.com" onkeydown="if(event.key==='Enter')goUrl()" />
+        <button class="btn primary" onclick="goUrl()">Git</button>
+        <button class="btn" onclick="chat('/back')">↩</button>
+        <button class="btn" onclick="chat('/forward')">↪</button>
+        <button class="btn" onclick="chat('/reload')">⟲</button>
+        <button class="btn" onclick="chat('/scroll')">▼</button>
+        <button class="btn" onclick="chat('/scroll up')">▲</button>
+        <button class="btn" onclick="chat('/screenshot')">🖼</button>
+        <button class="btn" id="streamBtn" onclick="toggleStream()">⏸ Akış</button>
+      </div>
+      <div class="screen" id="screen">
+        <div id="screenPlaceholder">
+          <div style="font-size:44px;margin-bottom:12px">🪞</div>
+          Tarayıcı başlatılıyor... ilk ekran görüntüsü birkaç saniye içinde gelecek.
+        </div>
+        <img id="mirrorImg" alt="Canlı tarayıcı görüntüsü" />
+      </div>
+      <div class="activity" id="activity">Aktivite: —</div>
+    </section>
+
+      <!-- PLATFORM ERISIM AYARLARI -->
+      <div class="card" id="platformCard">
+        <h3>Platform Erisim Yontemi</h3>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
+            <input type="radio" name="pMethod" value="login" id="mLogin" onchange="switchMethod('login')" style="width:auto">
+            <span><b>Yontem 1</b> — Playwright Login <span style="color:var(--green);font-size:10px">UCRETSIZ</span></span>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
+            <input type="radio" name="pMethod" value="rapidapi" id="mRapid" onchange="switchMethod('rapidapi')" style="width:auto">
+            <span><b>Yontem 2</b> — RapidAPI <span style="color:var(--accent);font-size:10px">~10$/AY</span></span>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
+            <input type="radio" name="pMethod" value="chrome_profile" id="mChrome" onchange="switchMethod('chrome_profile')" style="width:auto">
+            <span><b>Yontem 3</b> — Chrome Profile <span style="color:var(--blue);font-size:10px">YEREL</span></span>
+          </label>
+        </div>
+        <!-- Yontem 1: Login -->
+        <div id="m1Fields">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Chat kutusuna yazin:<br><code style="color:var(--green)">/login instagram EMAIL SIFRE</code><br><code style="color:var(--green)">/login x KULLANICI SIFRE</code></div>
+        </div>
+        <!-- Yontem 2: RapidAPI -->
+        <div id="m2Fields" style="display:none">
+          <label>RapidAPI Key</label>
+          <input id="rapidApiKey" placeholder="xxxxxxxxxxxxxxxxxxxxxxxx" />
+          <div style="font-size:10px;color:var(--muted);margin-top:4px">rapidapi.com → instagram-scraper-2022 veya twitter154</div>
+        </div>
+        <!-- Yontem 3: Chrome Profile -->
+        <div id="m3Fields" style="display:none">
+          <label>Chrome Profil Yolu</label>
+          <input id="chromeProfilePath" placeholder="C:/Users/AD/AppData/Local/Google/Chrome/User Data/Default" />
+          <div style="font-size:10px;color:var(--muted);margin-top:4px">Chrome'da giris yapilmis olmali. Tarayici kapali olmali.</div>
+        </div>
+        <button onclick="savePlatformConfig()" style="margin-top:10px">Kaydet</button>
+        <div id="platformStatus" style="font-size:11px;color:var(--green);margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h3>Kalici Hafiza</h3>
+        <div style="display:flex;gap:6px">
+          <select id="memCat">
+            <option value="profiles">profiles</option>
+            <option value="conversations">conversations</option>
+            <option value="learnings">learnings</option>
+          </select>
+          <input id="memKey" placeholder="anahtar" />
+        </div>
+        <label>Deger (JSON veya metin)</label>
+        <textarea id="memVal" rows="2" placeholder='{"username":"@ornek","note":"..."}'></textarea>
+        <button onclick="addMemory()">Ekle</button>
+        <div id="memList" style="margin-top:8px"></div>
+        <button onclick="clearMemory()" style="background:var(--red)">Hafizayi Temizle</button>
+      </div>
+      <div class="card">
+        <h3>Denetim Gunlugu</h3>
+        <div id="log"></div>
+      </div>
+    </section>
+  </main>
+
+
+  <!-- HANDOVER OVERLAY -->
+  <div id="handoverOverlay">
+    <div id="handoverCard">
+      <h2 id="handoverTitle">[ DEVIR ] IPLER SENDE MOSYO</h2>
+      <div class="hrow"><b>Hedef:</b> <span id="hTarget">—</span></div>
+      <div class="hrow"><b>Asil Tendonu:</b> <span id="hAchilles">—</span></div>
+      <div class="hscore" id="hScore">Frekans: —</div>
+      <div class="hhistory" id="hHistory"></div>
+      <div class="hbtns">
+        <button class="accept" onclick="closeHandover(true)">Teslim Al</button>
+        <button class="dismiss" onclick="closeHandover(false)">Beklet</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ALT: SOHBET -->
+  <section id="chat">
+    <div class="messages" id="messages"></div>
+    <div class="input-row">
+      <input id="chatInput" placeholder="Ajana emir ver... (/help)" autocomplete="off" />
+      <button onclick="sendChat()">Gönder</button>
+    </div>
+  </section>
+
+<script>
+  const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+  let ws = null;
+  let streamOn = true;
+  let state = { personality: {}, skills: [], memory: {}, agent: {} };
+  const $ = (id) => document.getElementById(id);
+
+  function connect() {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => { $("statusText").textContent = "Bağlı"; $("dot").className = "dot"; };
+    ws.onclose = () => {
+      $("statusText").textContent = "Koptu — yeniden bağlanıyor...";
+      $("dot").className = "dot off";
+      setTimeout(connect, 2000);
+    };
+    ws.onmessage = (e) => handle(JSON.parse(e.data));
+  }
+
+  function handle(data) {
+    switch (data.type) {
+      case "init":
+        state.personality = data.personality; state.skills = data.skills; state.agent = data.agent;
+        streamOn = data.stream_enabled;
+        renderSkills(); renderPersonality(); renderAgent(data.agent); renderMemoryState();
+        break;
+      case "mirror_frame":
+        if (!data.image) break;
+        $("mirrorImg").src = "data:image/jpeg;base64," + data.image;
+        $("mirrorImg").style.display = "block";
+        $("screenPlaceholder").style.display = "none";
+        if (data.url) { $("pageUrl").textContent = ">> " + data.url; $("urlInput").value = data.url; }
+        break;
+      case "agent_status": renderAgent(data.agent); break;
+      case "chat": addMsg(data.sender, data.message); break;
+      case "skill_toggled": renderSkills(); break;
+      case "personality_updated": state.personality = data.personality; renderPersonality(); break;
+      case "memory_updated": state.memory = data.memory; renderMemoryState(); break;
+      case "stream_toggled": streamOn = data.on; $("streamBtn").textContent = streamOn ? "Akis DURDUR" : "Akis BASLAT"; break;
+      case "radar_started": addMsg("ajan", `[RADAR] Frekans kuruldu: "${data.intent}"`); break;
+      case "log": addLog(data.message); break;
+
+      // Gorev Karti olusturuldu
+      case "mission_brief_ready":
+        showMissionBrief(data.brief);
+        break;
+
+      // Devir uyarisi — kirmizi overlay
+      case "handover_alert":
+        showHandoverAlert(data);
+        break;
+    }
+  }
+
+  function renderAgent(a) {
+    $("statusText").textContent = a.status;
+    $("dot").className = "dot" + (a.radar_active ? " busy" : "");
+    $("pageUrl").textContent = "📍 " + (a.current_page || "—") + (a.browser_running ? "" : "  (tarayıcı kapalı)");
+    $("activity").textContent = "Aktivite: " + a.activity;
+  }
+
+  function renderSkills() {
+    const box = $("skills"); box.innerHTML = "";
+    state.skills.forEach((s) => {
+      const el = document.createElement("div");
+      el.className = "skill" + (s.active ? "" : " off");
+      el.innerHTML = `<span class="s-icon">${s.icon}</span><span class="s-name">${s.name}</span><span class="s-state">${s.active ? "AÇIK" : "KAPALI"}</span>`;
+      el.title = s.description;
+      el.onclick = () => send({ type: "toggle_skill", skill_id: s.id });
+      box.appendChild(el);
+    });
+  }
+
+  function renderPersonality() {
+    const p = state.personality;
+    $("pName").value = p.name || ""; $("pTone").value = p.tone || ""; $("pPrompt").value = p.custom_prompt || "";
+  }
+
+  function renderMemoryState() {
+    const list = $("memList"); list.innerHTML = "";
+    ["profiles", "conversations", "learnings"].forEach((cat) => {
+      const bucket = (state.memory && state.memory[cat]) || {};
+      Object.entries(bucket).slice(0, 6).forEach(([k, v]) => {
+        const row = document.createElement("div");
+        row.className = "memory-item";
+        const val = typeof v === "string" ? v : JSON.stringify(v);
+        row.innerHTML = `<span><b>${cat}</b> · ${k}: ${val.slice(0, 40)}${val.length > 40 ? "…" : ""}</span>`;
+        const btn = document.createElement("button");
+        btn.textContent = "✕";
+        btn.onclick = () => send({ type: "memory_action", action: "forget", category: cat, key: k });
+        row.appendChild(btn);
+        list.appendChild(row);
+      });
+    });
+  }
+
+  function addMsg(sender, text) {
+    const m = $("messages");
+    const el = document.createElement("div");
+    const isMosyo = sender === "mösyö" || sender === "mosyo";
+    const isSistem = sender === "sistem";
+    el.className = "msg " + (isMosyo ? "m" : isSistem ? "s" : "a");
+    const who = isMosyo ? "MOSYO" : isSistem ? "[SISTEM]" : "AJAN";
+    el.innerHTML = `<div class="who">${who}</div>` + String(text).replace(/</g, "&lt;").replace(/\n/g, "<br>");
+    m.appendChild(el);
+    m.scrollTop = m.scrollHeight;
+  }
+
+  // Gorev Karti UI
+  function showMissionBrief(brief) {
+    const m = $("messages");
+    const card = document.createElement("div");
+    card.className = "mission-brief-card";
+    const triggers = (brief.core_triggers || []).map(t => `<span class="chip">${t}</span>`).join("");
+    const queries = (brief.search_queries || []).map(q => `<span class="chip">${q}</span>`).join("");
+    card.innerHTML = `
+      <div class="mb-title">[GOREV KARTI OLUSTURULDU]</div>
+      <div class="mb-row"><b>Vibe:</b> ${(brief.vibe_concept || "").slice(0,150)}</div>
+      <div class="mb-row"><b>Tetikleyiciler:</b><div class="mb-chips">${triggers}</div></div>
+      <div class="mb-row"><b>Sorgular:</b><div class="mb-chips">${queries}</div></div>
+      <div style="font-size:10px;color:#555;margin-top:6px">${brief.generated_at || ""}</div>
+    `;
+    m.appendChild(card);
+    m.scrollTop = m.scrollHeight;
+  }
+
+  // Handover kirmizi overlay
+  function showHandoverAlert(data) {
+    $("hTarget").textContent = data.target || "";
+    $("hAchilles").textContent = data.achilles_heel || "";
+    const score = parseFloat(data.score) || 0;
+    const bar = "#".repeat(Math.round(score)) + ".".repeat(10 - Math.round(score));
+    $("hScore").textContent = `Frekans: ${score.toFixed(1)}/10  [${bar}]`;
+    // Sohbet gecmisi
+    const hist = $("hHistory");
+    hist.innerHTML = "";
+    const history = data.chat_history || [];
+    if (history.length === 0) {
+      hist.textContent = "(Sohbet gecmisi yok)";
+    } else {
+      history.slice(-6).forEach(h => {
+        const d = document.createElement("div");
+        d.textContent = `${h.sender || h.role || "?"}: ${h.message || h.content || ""}`.slice(0,120);
+        hist.appendChild(d);
+      });
+    }
+    $("handoverOverlay").classList.add("visible");
+    // Ses uyarisi (tarayici izin verirse)
+    try { new Audio("data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAA").play(); } catch(_) {}
+  }
+
+  function closeHandover(accepted) {
+    $("handoverOverlay").classList.remove("visible");
+    addMsg("sistem", accepted ? "[DEVIR] Teslim alindi. Kontrol sizde." : "[DEVIR] Bekletildi.");
+  }
+
+  function addLog(msg) {
+    const l = $("log");
+    const el = document.createElement("div");
+    el.textContent = "• " + msg;
+    l.prepend(el);
+    while (l.children.length > 50) l.removeChild(l.lastChild);
+  }
+
+  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  function chat(msg) {
+    addMsg("mösyö", msg);
+    send({ type: "chat", message: msg });
+  }
+
+  function sendChat() {
+    const input = $("chatInput"); const msg = input.value.trim();
+    if (!msg) return;
+    chat(msg);
+    input.value = "";
+  }
+
+  function sendRadar() {
+    const input = $("radarText"); const intent = input.value.trim();
+    if (!intent) return;
+    chat("/radar " + intent);
+    input.value = "";
+  }
+
+  function goUrl() {
+    const url = $("urlInput").value.trim();
+    if (url) send({ type: "browser_goto", url });
+  }
+
+  function toggleStream() {
+    streamOn = !streamOn;
+    send({ type: "stream_toggle", on: streamOn });
+  }
+
+  function savePersonality() {
+    send({
+      type: "update_personality",
+      updates: { name: $("pName").value, tone: $("pTone").value, custom_prompt: $("pPrompt").value },
+    });
+    addLog("Kişilik kaydedildi");
+  }
+
+  function addMemory() {
+    let val = $("memVal").value.trim();
+    try { val = JSON.parse(val); } catch (_) { /* metin olarak sakla */ }
+    send({ type: "memory_action", action: "remember", category: $("memCat").value, key: $("memKey").value.trim(), value: val });
+    $("memVal").value = ""; $("memKey").value = "";
+  }
+
+  function clearMemory() {
+    if (confirm("Tüm hafıza silinsin mi?")) send({ type: "memory_action", action: "clear" });
+  }
+
+  function switchMethod(m) {
+    $("m1Fields").style.display = m === "login" ? "" : "none";
+    $("m2Fields").style.display = m === "rapidapi" ? "" : "none";
+    $("m3Fields").style.display = m === "chrome_profile" ? "" : "none";
+  }
+
+  async function savePlatformConfig() {
+    const method = document.querySelector('input[name="pMethod"]:checked')?.value || "login";
+    const body = {
+      method,
+      rapidapi_key: ($("rapidApiKey") || {value:""}).value.trim(),
+      chrome_profile_path: ($("chromeProfilePath") || {value:""}).value.trim(),
+    };
+    try {
+      const r = await fetch("/api/platform/config", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      $("platformStatus").textContent = d.ok ? "Kaydedildi: " + method : "Hata: " + (d.error || "?");
+      addLog("Platform yontemi: " + method);
+    } catch(e) {
+      $("platformStatus").textContent = "Hata: " + e.message;
+    }
+  }
+
+  async function loadPlatformConfig() {
+    try {
+      const r = await fetch("/api/platform/config");
+      const cfg = await r.json();
+      const m = cfg.method || "login";
+      const radio = document.querySelector(`input[name="pMethod"][value="${m}"]`);
+      if (radio) { radio.checked = true; switchMethod(m); }
+      if (cfg.rapidapi_key && $("rapidApiKey")) $("rapidApiKey").value = cfg.rapidapi_key;
+      if (cfg.chrome_profile_path && $("chromeProfilePath")) $("chromeProfilePath").value = cfg.chrome_profile_path;
+      $("platformStatus").textContent = "Aktif yontem: " + m;
+    } catch(_) {}
+  }
+
+  $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
+  loadPlatformConfig();
+  connect();
+</script>
+</body>
+</html>
