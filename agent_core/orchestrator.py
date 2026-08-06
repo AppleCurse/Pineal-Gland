@@ -24,10 +24,12 @@ from config import Settings
 from services.agent_zero import AgentZeroClient
 from services.deerflow import DeerFlowClient
 from services.eliza import ElizaClient
-from services.handover import FrequencyLimiter, TelegramHandover
-from services.scraper import SocialScraper
+from services.handover import FrequencyLimiter, CockpitHandover
+from services.scraper import scrape_target
 from services.session_store import SessionStore
 from services.uitars import GUIAgent, PlaywrightOperator, UITarsModelClient
+from services.analyzer import ProfileAnalyzer
+from resonance_graph import create_resonance_graph
 
 logger = logging.getLogger("agent_core.orchestrator")
 
@@ -46,9 +48,10 @@ class Orchestrator:
         self.df = DeerFlowClient(settings.deerflow_url, timeout=settings.http_timeout * 2)
         self.eliza = ElizaClient(settings.eliza_url, settings.eliza_agent_id, settings.eliza_token)
         self.sessions = SessionStore(settings.session_store_path, settings.session_store_key)
-        self.scraper = SocialScraper()
+        self.analyzer = ProfileAnalyzer()
         self.limiter = FrequencyLimiter()
-        self.handover = TelegramHandover()
+        self.handover = CockpitHandover()
+        self.resonance_graph = create_resonance_graph()
         self._tasks: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
@@ -101,11 +104,50 @@ class Orchestrator:
                 # Frekans ve ısınma kontrolü
                 await self.limiter.check_and_wait(target)
                 try:
-                    scraped_data = await self.scraper.scrape_target(target, platform)
+                    scraped_data = await scrape_target(target, platform)
                     report["scraped_data"] = scraped_data
                     await self._step(record, "scraper", "ok", f"Hedef tarandı: {target} (takipçi: {scraped_data.get('followers')})")
+
+                    # Psikolojik profil analizi
+                    try:
+                        analyzed_profile = await self.analyzer.analyze(scraped_data)
+                        analyzed_profile["username"] = scraped_data.get("username")
+                        analyzed_profile["platform"] = scraped_data.get("platform")
+                        report["analyzed_profile"] = analyzed_profile
+                        await self._step(record, "analyzer", "ok", f"Profil analiz edildi: Rezonans {analyzed_profile.get('resonance_score')}")
+
+                        # Rezonans motoru (LangGraph)
+                        try:
+                            current_account = account or "default"
+                            session_data = None
+                            if platform:
+                                session_data = self.sessions.load(platform, current_account)
+
+                            cookies = session_data.get("cookies", []) if session_data else []
+
+                            initial_state = {
+                                "profile": analyzed_profile,
+                                "score": 0.0,
+                                "strategy": "",
+                                "messages_sent": 0,
+                                "handover_ready": False,
+                                "status": "init",
+                                "cookies": cookies,
+                            }
+                            graph_result = await self.resonance_graph.ainvoke(initial_state)
+                            report["resonance_engine"] = graph_result
+                            await self._step(record, "resonance_engine", "ok", f"Rezonans motoru çalıştı: strateji={graph_result.get('strategy')}")
+                        except Exception as exc:
+                            report["resonance_engine"] = None
+                            await self._step(record, "resonance_engine", "failed", f"Rezonans motoru hatası: {exc}")
+
+                    except Exception as exc:
+                        report["analyzed_profile"] = None
+                        await self._step(record, "analyzer", "failed", f"Profil analizi yapılamadı: {exc}")
+
                 except Exception as exc:
                     report["scraped_data"] = None
+                    report["analyzed_profile"] = None
                     await self._step(record, "scraper", "failed", f"Tarama yapılamadı: {exc}")
 
             # 2. ELIZA — persona bağlamı
