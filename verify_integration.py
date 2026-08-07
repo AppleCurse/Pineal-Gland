@@ -64,7 +64,7 @@ async def run_tests() -> bool:
         try:
             r = await client.post(
                 f"{AGENT_CORE_URL}/task",
-                json={"intent": "test", "prompt": "Sistem testi — entegrasyon dogrulama"},
+                json={"intent": "Sistem testi — entegrasyon dogrulama"},
             )
             if r.status_code in (200, 201):
                 data = r.json()

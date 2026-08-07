@@ -29,12 +29,15 @@ class SessionStore:
     def __init__(self, path: str, key_hex: str):
         self.path = Path(path)
         self._lock = threading.RLock()
-        self._key = self._derive_key(key_hex)
+        self._enabled = bool(key_hex)
+        self._key: Optional[bytes] = None
+        if self._enabled:
+            self._key = self._derive_key(key_hex)
+        else:
+            logger.warning("SESSION_STORE_KEY bos — oturum depolama devre disi")
 
     @staticmethod
     def _derive_key(key_hex: str) -> bytes:
-        if not key_hex:
-            raise SessionStoreError("SESSION_STORE_KEY eksik (32 veya 64 hex karakter)")
         try:
             raw = bytes.fromhex(key_hex)
         except ValueError as exc:
@@ -82,6 +85,9 @@ class SessionStore:
     # -- API -----------------------------------------------------------------
     def save(self, platform: str, account: str, cookies: Dict[str, Any], refresh_token: Optional[str] = None) -> None:
         """Oturumu şifreleyip (platform, hesap) altına kaydeder."""
+        if not self._enabled:
+            logger.debug("session_store devre disi — save atlandi")
+            return
         from datetime import datetime, timezone
 
         record = {"cookies": cookies}
@@ -96,6 +102,8 @@ class SessionStore:
         logger.info("oturum kaydedildi: %s / %s", platform, account)
 
     def load(self, platform: str, account: str) -> Optional[Dict[str, Any]]:
+        if not self._enabled:
+            return None
         with self._lock:
             data = self._load_disk()
             blob = data.get(platform, {}).get(account)
@@ -108,6 +116,8 @@ class SessionStore:
                 return None
 
     def delete(self, platform: str, account: str) -> bool:
+        if not self._enabled:
+            return False
         with self._lock:
             data = self._load_disk()
             bucket = data.get(platform)
@@ -119,6 +129,8 @@ class SessionStore:
         return False
 
     def list_accounts(self, platform: Optional[str] = None) -> List[str]:
+        if not self._enabled:
+            return []
         with self._lock:
             data = self._load_disk()
             if platform:
