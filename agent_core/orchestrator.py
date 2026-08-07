@@ -34,6 +34,7 @@ from services.session_store import SessionStore
 from services.uitars import GUIAgent, PlaywrightOperator, UITarsModelClient
 from services.analyzer import ProfileAnalyzer
 from services.llm_gateway import LLMGateway
+from services.memory_manager import MemoryManager
 from resonance_graph import create_resonance_graph
 
 logger = logging.getLogger("agent_core.orchestrator")
@@ -96,6 +97,7 @@ class ServiceContainer:
     persona_client: Optional[PersonaClientProtocol] = None
     profile_analyzer: Optional[ProfileAnalyzerProtocol] = None
     session_store: Optional[SessionStore] = None
+    memory_manager: Optional[MemoryManager] = None
     llm_gateway: Optional[LLMGateway] = None
 
 
@@ -123,6 +125,8 @@ def build_default_services(settings: Settings) -> ServiceContainer:
         session_store=SessionStore(
             settings.session_store_path, settings.session_store_key,
         ),
+        memory_manager=MemoryManager(
+        ),
     )
 
 
@@ -145,6 +149,7 @@ class Orchestrator:
 
         # Oturum deposu
         self.sessions = svc.session_store
+        self.memory = svc.memory_manager
 
         # Altyapi servisleri (bunlar DI'den bagimsiz, hafif)
         self.limiter = FrequencyLimiter()
@@ -224,6 +229,17 @@ class Orchestrator:
                             analyzed_profile["platform"] = scraped_data.get("platform")
                             report["analyzed_profile"] = analyzed_profile
                             confidence = analyzed_profile.get("overall_confidence", 0.0)
+
+                            # Memory Policy & Delta tracking
+                            if self.memory:
+                                mem_res = self.memory.process_profile(
+                                    analyzed_profile.get("platform", "unknown"),
+                                    analyzed_profile.get("username", "unknown"),
+                                    analyzed_profile
+                                )
+                                report["memory_delta"] = mem_res
+                                await self._step(record, "memory", "ok", f"Memory işlendi: {mem_res.get('status')}")
+
                             await self._step(record, "analyzer", "ok",
                                              f"Sinyal cikarimi tamamlandi: guven={confidence:.2f}")
                         else:
