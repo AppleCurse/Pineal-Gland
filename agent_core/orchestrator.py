@@ -192,6 +192,21 @@ class Orchestrator:
         return result
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _plan(intent: str) -> Dict[str, bool]:
+        """Deterministic routing: hangi servisler calisacak? (LLM yok)"""
+        intent_lower = (intent or "").lower()
+        words = intent_lower.split()
+        # Stem match: keyword herhangi bir kelimenin basinda/icinde var mi?
+        persona_kw = ["konus", "etkiles", "cevapla", "sohbet", "mesaj", "yorum", "karsilik", "diyalog"]
+        research_kw = ["arastir", "incele", "rapor", "karsilastir", "derinlemesine", "analiz"]
+        orch_kw = ["olustur", "calistir", "gonder", "gorev", "otomatik", "planla", "uretim", "icerik"]
+        return {
+            "need_persona": any(kw in w for kw in persona_kw for w in words),
+            "need_research": any(kw in w for kw in research_kw for w in words) or "analiz et" in intent_lower,
+            "need_orchestration": any(kw in w for kw in orch_kw for w in words) or "yap" in words,
+        }
+
     async def run_pipeline(
         self,
         intent: str,
@@ -205,6 +220,10 @@ class Orchestrator:
         record = self.register_task(task_id, intent)
         report: Dict[str, Any] = {"intent": intent, "target": target}
         try:
+            # 0. ROUTING PLAN
+            plan = self._plan(intent)
+            report["plan"] = plan
+
             # 1. INTENT & SCRAPE
             await self._step(record, "intent", "ok", f"Görev kaydedildi: {intent}")
             if target:
@@ -269,6 +288,24 @@ class Orchestrator:
                                 cv = graph_result.get("compatibility", {})
                                 await self._step(record, "resonance_engine", "ok",
                                                  f"Rezonans: composite={cv.get('composite', 0):.2f}, strateji={graph_result.get('strategy')}")
+
+                                # COLLECT_MORE auto-retry (maksimum 1 ek deneme)
+                                uncertainty = graph_result.get("uncertainty") or {}
+                                if uncertainty.get("collect_more_count", 0) > 0:
+                                    try:
+                                        logger.info("COLLECT_MORE tetiklendi — force_refresh ile yeniden scrape: %s", target)
+                                        scraped_retry = await scrape_target(target, platform, force_refresh=True)
+                                        retry_profile = await self.analyzer.analyze(scraped_retry)
+                                        retry_profile["username"] = scraped_retry.get("username")
+                                        retry_profile["platform"] = scraped_retry.get("platform")
+                                        report["analyzed_profile_retry"] = retry_profile
+                                        await self._step(record, "scraper_retry", "ok",
+                                                         f"COLLECT_MORE: retry tamamlandi, guven={retry_profile.get('overall_confidence', 0):.2f}")
+                                    except Exception as exc:
+                                        logger.warning("COLLECT_MORE retry basarisiz: %s", exc)
+                                        report["retry_status"] = "failed"
+                                else:
+                                    report["retry_status"] = "not_needed"
                             except Exception as exc:
                                 report["resonance_engine"] = None
                                 await self._step(record, "resonance_engine", "failed", f"Rezonans motoru hatası: {exc}")
@@ -284,57 +321,69 @@ class Orchestrator:
                     report["analyzed_profile"] = None
                     await self._step(record, "scraper", "failed", f"Tarama yapılamadı: {exc}")
 
-            # 2. ELIZA — persona bağlamı
-            room = target or intent[:40]
-            if self.eliza:
-                try:
-                    ctx = await self.eliza.recall(room)
-                    report["eliza_context"] = ctx
-                    await self._step(record, "eliza", "ok",
-                                     f"Persona hafızası okundu (room={room}, {len(ctx)} karakter)")
-                except Exception as exc:
+            # 2. ELIZA — persona bağlamı (sadece plan gerektiriyorsa)
+            if plan["need_persona"]:
+                room = target or intent[:40]
+                if self.eliza:
+                    try:
+                        ctx = await self.eliza.recall(room)
+                        report["eliza_context"] = ctx
+                        await self._step(record, "eliza", "ok",
+                                         f"Persona hafızası okundu (room={room}, {len(ctx)} karakter)")
+                    except Exception as exc:
+                        report["eliza_context"] = None
+                        await self._step(record, "eliza", "unavailable", f"Eliza erişilemedi: {exc}")
+                else:
                     report["eliza_context"] = None
-                    await self._step(record, "eliza", "unavailable", f"Eliza erişilemedi: {exc}")
+                    await self._step(record, "eliza", "skipped", "Persona servisi yapilandirilmamis")
             else:
                 report["eliza_context"] = None
-                await self._step(record, "eliza", "unavailable", "Persona servisi yapilandirilmamis")
+                await self._step(record, "eliza", "skipped", "Plan gerektirmiyor")
 
-            # 3. DEER-FLOW — uzun bağlamlı analiz
-            if self.df:
-                query = f"Kültürel frekans analizi hedefi: {target or intent}"
-                try:
-                    research = await self.df.run_research(query, self.settings.deerflow_assistant_id)
-                    report["research"] = research
-                    await self._step(record, "deerflow", "ok",
-                                     f"Derin analiz tamamlandı (thread={research.get('thread_id')})")
-                except Exception as exc:
+            # 3. DEER-FLOW — uzun bağlamlı analiz (sadece plan gerektiriyorsa)
+            if plan["need_research"]:
+                if self.df:
+                    query = f"Kültürel frekans analizi hedefi: {target or intent}"
+                    try:
+                        research = await self.df.run_research(query, self.settings.deerflow_assistant_id)
+                        report["research"] = research
+                        await self._step(record, "deerflow", "ok",
+                                         f"Derin analiz tamamlandı (thread={research.get('thread_id')})")
+                    except Exception as exc:
+                        report["research"] = None
+                        await self._step(record, "deerflow", "unavailable", f"Deer-Flow erişilemedi: {exc}")
+                else:
                     report["research"] = None
-                    await self._step(record, "deerflow", "unavailable", f"Deer-Flow erişilemedi: {exc}")
+                    await self._step(record, "deerflow", "skipped", "Derin analiz servisi yapilandirilmamis")
             else:
                 report["research"] = None
-                await self._step(record, "deerflow", "unavailable", "Derin analiz servisi yapilandirilmamis")
+                await self._step(record, "deerflow", "skipped", "Plan gerektirmiyor")
 
-            # 4. AGENT-ZERO — ana orkestratöre emir (iç alt-ajanları o yönetir)
-            if self.az:
-                command = (
-                    f"Yeni görev. Niyet: {intent}\n"
-                    f"Hedef: {target or 'belirtilmedi'}\n"
-                    f"Derin analiz raporu: {str(report.get('research'))[:800]}\n"
-                    f"Persona bağlamı: {str(report.get('eliza_context'))[:400]}\n"
-                    "Bu görev için gerekli alt-ajanları dinamik olarak oluştur, işi "
-                    "yürüt ve tamamlanınca sonlandır. Sonucu raporla."
-                )
-                try:
-                    az_result = await self.az.send_message(command, agent_profile="default")
-                    report["agent_zero"] = az_result
-                    await self._step(record, "agent_zero", "ok",
-                                     f"Orkestrasyon yanıtı alındı (context={az_result.get('context_id')})")
-                except Exception as exc:
+            # 4. AGENT-ZERO — ana orkestratöre emir (sadece plan gerektiriyorsa)
+            if plan["need_orchestration"]:
+                if self.az:
+                    command = (
+                        f"Yeni görev. Niyet: {intent}\n"
+                        f"Hedef: {target or 'belirtilmedi'}\n"
+                        f"Derin analiz raporu: {str(report.get('research'))[:800]}\n"
+                        f"Persona bağlamı: {str(report.get('eliza_context'))[:400]}\n"
+                        "Bu görev için gerekli alt-ajanları dinamik olarak oluştur, işi "
+                        "yürüt ve tamamlanınca sonlandır. Sonucu raporla."
+                    )
+                    try:
+                        az_result = await self.az.send_message(command, agent_profile="default")
+                        report["agent_zero"] = az_result
+                        await self._step(record, "agent_zero", "ok",
+                                         f"Orkestrasyon yanıtı alındı (context={az_result.get('context_id')})")
+                    except Exception as exc:
+                        report["agent_zero"] = None
+                        await self._step(record, "agent_zero", "unavailable", f"Agent-Zero erişilemedi: {exc}")
+                else:
                     report["agent_zero"] = None
-                    await self._step(record, "agent_zero", "unavailable", f"Agent-Zero erişilemedi: {exc}")
+                    await self._step(record, "agent_zero", "skipped", "Agent orkestratoru yapilandirilmamis")
             else:
                 report["agent_zero"] = None
-                await self._step(record, "agent_zero", "unavailable", "Agent orkestratoru yapilandirilmamis")
+                await self._step(record, "agent_zero", "skipped", "Plan gerektirmiyor")
 
             # 5. UI-TARS — piksel tabanlı görsel görev
             if visual_task:
