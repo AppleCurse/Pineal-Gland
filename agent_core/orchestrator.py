@@ -34,6 +34,7 @@ from services.session_store import SessionStore
 from services.uitars import GUIAgent, PlaywrightOperator, UITarsModelClient
 from services.analyzer import ProfileAnalyzer
 from services.llm_gateway import LLMGateway
+from services.memory_delta import record_profile
 from resonance_graph import create_resonance_graph
 
 logger = logging.getLogger("agent_core.orchestrator")
@@ -226,6 +227,20 @@ class Orchestrator:
                             confidence = analyzed_profile.get("overall_confidence", 0.0)
                             await self._step(record, "analyzer", "ok",
                                              f"Sinyal cikarimi tamamlandi: guven={confidence:.2f}")
+
+                            # MemoryDelta — profili history'ye kaydet
+                            try:
+                                delta = record_profile(analyzed_profile)
+                                if delta:
+                                    report["memory_delta"] = {
+                                        "changed_fields": delta.changed_fields,
+                                        "reason": delta.reason,
+                                    }
+                                    await self._step(record, "memory", "ok", f"Delta kaydedildi: {delta.reason}")
+                                else:
+                                    await self._step(record, "memory", "ok", "Ilk kayit, delta yok")
+                            except Exception as exc:
+                                logger.warning("MemoryDelta hatasi: %s", exc)
                         else:
                             report["analyzed_profile"] = None
                             await self._step(record, "analyzer", "unavailable", "Profil analiz servisi yapilandirilmamis")

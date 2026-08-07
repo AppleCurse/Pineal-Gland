@@ -165,7 +165,26 @@ async def list_tasks():
 @app.get("/health")
 async def health():
     services = await orch.health_async()
-    return {"status": "alive", "ts": datetime.now(timezone.utc).isoformat(), "services": services}
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    # CircuitBreaker durumu
+    llm_status: Dict[str, Any] = {"models": {}}
+    try:
+        from services.llm_gateway import get_llm_gateway
+        gw = get_llm_gateway()
+        cb = gw.cb
+        for model in [gw.model, gw.fallback_model]:
+            if model:
+                llm_status["models"][model] = cb.status(model)
+    except Exception as exc:
+        llm_status["error"] = str(exc)
+
+    return {
+        "status": "alive",
+        "ts": timestamp,
+        "services": services,
+        "llm_gateway": llm_status,
+    }
 
 
 @app.get("/agents")
@@ -186,6 +205,30 @@ async def list_sessions(platform: Optional[str] = None):
     try:
         accounts = orch.sessions.list_accounts(platform)
         return {"accounts": accounts}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@app.get("/memory/{platform}/{username}")
+async def get_memory(platform: str, username: str, limit: int = 10):
+    """BehavioralProfile gecmisini dondurur."""
+    from services.memory_delta import get_history
+    try:
+        entries = get_history(username, platform, limit=limit)
+        return {"username": username, "platform": platform, "entries": entries, "count": len(entries)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@app.get("/memory/{platform}/{username}/latest")
+async def get_latest_profile(platform: str, username: str):
+    """En guncel BehavioralProfile snapshot'u dondurur."""
+    from services.memory_delta import get_latest
+    try:
+        snap = get_latest(username, platform)
+        if snap:
+            return snap
+        return {"error": "kayit bulunamadi"}
     except Exception as exc:
         return {"error": str(exc)}
 
