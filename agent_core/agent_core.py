@@ -165,7 +165,24 @@ async def list_tasks():
 @app.get("/health")
 async def health():
     services = await orch.health_async()
-    return {"status": "alive", "ts": datetime.now(timezone.utc).isoformat(), "services": services}
+
+    # LLM Gateway Metrics & CB Status
+    llm_metrics = {}
+    if orch.analyzer and orch.analyzer.gateway:
+        gw = orch.analyzer.gateway
+        llm_metrics = {
+            "model": gw.model,
+            "fallback_model": gw.fallback_model,
+            "circuit_breaker": gw.cb.status(gw.model),
+            "usage": gw.get_usage_stats() if hasattr(gw, "get_usage_stats") else None
+        }
+
+    return {
+        "status": "alive",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "services": services,
+        "llm_gateway": llm_metrics
+    }
 
 
 @app.get("/agents")

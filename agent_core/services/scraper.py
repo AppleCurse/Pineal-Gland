@@ -254,8 +254,23 @@ async def scrape_target(
     cache = _load_cache()
 
     if not force_refresh and cache_key in cache:
-        logger.info("Önbellekten döndü: %s", cache_key)
-        return cache[cache_key]
+        cached_data = cache[cache_key]
+        scraped_at_str = cached_data.get("scraped_at")
+        if scraped_at_str:
+            try:
+                scraped_at = datetime.fromisoformat(scraped_at_str)
+                now = datetime.now(timezone.utc)
+                diff = now - scraped_at
+                # TTL: 24 hours
+                if diff.total_seconds() < 24 * 3600:
+                    logger.info("Önbellekten döndü (TTL gecerli): %s", cache_key)
+                    return cached_data
+                else:
+                    logger.info("Önbellek süresi dolmuş (TTL > 24h), yeniden çekiliyor: %s", cache_key)
+            except ValueError:
+                logger.warning("Geçersiz scraped_at formatı, yeniden çekiliyor: %s", cache_key)
+        else:
+            logger.info("scraped_at bulunamadı, yeniden çekiliyor: %s", cache_key)
 
     # Playwright stealth ile çek
     async with async_playwright() as p:
