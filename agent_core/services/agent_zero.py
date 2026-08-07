@@ -27,7 +27,11 @@ class AgentZeroError(RuntimeError):
     pass
 
 
-class AgentZeroClient:
+from services.registry import ICodeExecution
+
+class AgentZeroClient(ICodeExecution):
+    async def execute(self, command: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return await self.send_message(command, context_id=context.get("context_id") if context else None)
     def __init__(self, base_url: str, api_key: str, timeout: float = 600.0, max_retries: int = 3):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key

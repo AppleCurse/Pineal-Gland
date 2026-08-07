@@ -185,12 +185,15 @@ async def health():
     }
 
 
+from services.registry import IPersona
+
 @app.get("/agents")
 async def list_agents():
-    if not orch.eliza:
+    eliza = orch.registry.get(IPersona)
+    if not eliza:
         return {"error": "Persona servisi yapilandirilmamis"}
     try:
-        agents = await orch.eliza.get_agents()
+        agents = await eliza.list_personas()
         return {"agents": agents}
     except Exception as exc:
         return {"error": f"Eliza erişilemedi: {exc}"}

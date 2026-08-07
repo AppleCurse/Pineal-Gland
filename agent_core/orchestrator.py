@@ -35,6 +35,8 @@ from services.uitars import GUIAgent, PlaywrightOperator, UITarsModelClient
 from services.analyzer import ProfileAnalyzer
 from services.llm_gateway import LLMGateway
 from services.memory_manager import MemoryManager
+from services.registry import CapabilityRegistry, ICodeExecution, IDeepResearch, IPersona, IVision
+from services.event_bus import get_event_bus
 from resonance_graph import create_resonance_graph
 
 logger = logging.getLogger("agent_core.orchestrator")
@@ -89,12 +91,8 @@ class ServiceContainer:
     """Tum servis bagimliliklarini tek bir yerde toplar.
 
     Orchestrator bu container'daki servisleri kullanir.
-    Her servis opsiyoneldir — None ise o adim atlanir.
     """
-
-    agent_orchestrator: Optional[AgentOrchestratorProtocol] = None
-    research_client: Optional[ResearchClientProtocol] = None
-    persona_client: Optional[PersonaClientProtocol] = None
+    registry: CapabilityRegistry
     profile_analyzer: Optional[ProfileAnalyzerProtocol] = None
     session_store: Optional[SessionStore] = None
     memory_manager: Optional[MemoryManager] = None
@@ -103,17 +101,22 @@ class ServiceContainer:
 
 def build_default_services(settings: Settings) -> ServiceContainer:
     """Settings'ten varsayilan servis istemcilerini olusturur."""
+    reg = CapabilityRegistry()
+
+    # Register capabilities instead of hardcoded agents
+    reg.register(ICodeExecution, AgentZeroClient(
+        settings.agent_zero_url, settings.agent_zero_api_key,
+        timeout=settings.http_timeout, max_retries=settings.max_retries,
+    ))
+    reg.register(IDeepResearch, DeerFlowClient(
+        settings.deerflow_url, timeout=settings.http_timeout * 2,
+    ))
+    reg.register(IPersona, ElizaClient(
+        settings.eliza_url, settings.eliza_agent_id, settings.eliza_token,
+    ))
+
     return ServiceContainer(
-        agent_orchestrator=AgentZeroClient(
-            settings.agent_zero_url, settings.agent_zero_api_key,
-            timeout=settings.http_timeout, max_retries=settings.max_retries,
-        ),
-        research_client=DeerFlowClient(
-            settings.deerflow_url, timeout=settings.http_timeout * 2,
-        ),
-        persona_client=ElizaClient(
-            settings.eliza_url, settings.eliza_agent_id, settings.eliza_token,
-        ),
+        registry=reg,
         profile_analyzer=ProfileAnalyzer(
             gateway=LLMGateway(
                 base_url=settings.llm_gateway_url,
@@ -135,14 +138,7 @@ class Orchestrator:
         self.settings = settings
         svc = services or build_default_services(settings)
 
-        # Agent orkestratoru (Agent-Zero veya muadili)
-        self.az = svc.agent_orchestrator
-
-        # Derin arastirma (Deer-Flow veya muadili)
-        self.df = svc.research_client
-
-        # Persona + hafiza (ElizaOS veya muadili)
-        self.eliza = svc.persona_client
+        self.registry = svc.registry
 
         # Profil analiz (behavioral signal extractor)
         self.analyzer = svc.profile_analyzer
@@ -150,6 +146,8 @@ class Orchestrator:
         # Oturum deposu
         self.sessions = svc.session_store
         self.memory = svc.memory_manager
+
+        self.event_bus = get_event_bus()
 
         # Altyapi servisleri (bunlar DI'den bagimsiz, hafif)
         self.limiter = FrequencyLimiter()
@@ -181,16 +179,21 @@ class Orchestrator:
 
     async def _service_health(self) -> Dict[str, bool]:
         result: Dict[str, bool] = {}
-        if self.az:
-            result["agent_zero"] = await self.az.health()
+        az = self.registry.get(ICodeExecution)
+        if az:
+            result["agent_zero"] = await az.health()
         else:
             result["agent_zero"] = False
-        if self.df:
-            result["deerflow"] = await self.df.health()
+
+        df = self.registry.get(IDeepResearch)
+        if df:
+            result["deerflow"] = await df.health()
         else:
             result["deerflow"] = False
-        if self.eliza:
-            result["eliza"] = await self.eliza.health()
+
+        eliza = self.registry.get(IPersona)
+        if eliza:
+            result["eliza"] = await eliza.health()
         else:
             result["eliza"] = False
         return result
@@ -287,9 +290,10 @@ class Orchestrator:
 
             # 2. ELIZA — persona bağlamı
             room = target or intent[:40]
-            if self.eliza:
+            eliza = self.registry.get(IPersona)
+            if eliza:
                 try:
-                    ctx = await self.eliza.recall(room)
+                    ctx = await eliza.get_context(room)
                     report["eliza_context"] = ctx
                     await self._step(record, "eliza", "ok",
                                      f"Persona hafızası okundu (room={room}, {len(ctx)} karakter)")
@@ -301,10 +305,11 @@ class Orchestrator:
                 await self._step(record, "eliza", "unavailable", "Persona servisi yapilandirilmamis")
 
             # 3. DEER-FLOW — uzun bağlamlı analiz
-            if self.df:
+            df = self.registry.get(IDeepResearch)
+            if df:
                 query = f"Kültürel frekans analizi hedefi: {target or intent}"
                 try:
-                    research = await self.df.run_research(query, self.settings.deerflow_assistant_id)
+                    research = await df.research(query, {"assistant_id": self.settings.deerflow_assistant_id})
                     report["research"] = research
                     await self._step(record, "deerflow", "ok",
                                      f"Derin analiz tamamlandı (thread={research.get('thread_id')})")
@@ -316,7 +321,8 @@ class Orchestrator:
                 await self._step(record, "deerflow", "unavailable", "Derin analiz servisi yapilandirilmamis")
 
             # 4. AGENT-ZERO — ana orkestratöre emir (iç alt-ajanları o yönetir)
-            if self.az:
+            az = self.registry.get(ICodeExecution)
+            if az:
                 command = (
                     f"Yeni görev. Niyet: {intent}\n"
                     f"Hedef: {target or 'belirtilmedi'}\n"
@@ -326,7 +332,7 @@ class Orchestrator:
                     "yürüt ve tamamlanınca sonlandır. Sonucu raporla."
                 )
                 try:
-                    az_result = await self.az.send_message(command, agent_profile="default")
+                    az_result = await az.execute(command, {"agent_profile": "default"})
                     report["agent_zero"] = az_result
                     await self._step(record, "agent_zero", "ok",
                                      f"Orkestrasyon yanıtı alındı (context={az_result.get('context_id')})")
@@ -339,11 +345,18 @@ class Orchestrator:
 
             # 5. UI-TARS — piksel tabanlı görsel görev
             if visual_task:
-                try:
+                # Let's see if we have a vision capability registered, or fallback to direct instantiation
+                vision = self.registry.get(IVision)
+                if not vision:
+                    # Do not register stateful instances globally.
+                    # In a true factory pattern, the registry would yield a new instance.
+                    # For now, just instantiate and use directly.
                     operator = PlaywrightOperator(start_url=target or "https://example.com")
                     model = UITarsModelClient(self.settings.uitars_remote_endpoint)
-                    agent = GUIAgent(operator, model, visual_task)
-                    uitars_result = await agent.run()
+                    vision = GUIAgent(operator, model, visual_task)
+
+                try:
+                    uitars_result = await vision.run_visual_task(target or "https://example.com", visual_task)
                     report["uitars"] = uitars_result
                     await self._step(record, "uitars", "ok",
                                      f"Görsel görev tamamlandı (adım {uitars_result.get('step')})")

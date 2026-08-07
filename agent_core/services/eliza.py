@@ -24,7 +24,14 @@ class ElizaError(RuntimeError):
     pass
 
 
-class ElizaClient:
+from services.registry import IPersona
+
+class ElizaClient(IPersona):
+    async def get_context(self, target_id: str) -> str:
+        return await self.recall(target_id)
+
+    async def list_personas(self) -> Any:
+        return await self.get_agents()
     def __init__(self, base_url: str, agent_id: str, token: str = "", timeout: float = 60.0):
         self.base_url = base_url.rstrip("/")
         self.agent_id = agent_id

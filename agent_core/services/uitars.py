@@ -173,7 +173,18 @@ def parse_action(prediction: str) -> Dict[str, Any]:
     return action
 
 
-class GUIAgent:
+from services.registry import IVision
+
+class GUIAgent(IVision):
+    async def health(self) -> bool:
+        # Dummy health check for now, can be improved.
+        return True
+
+    async def run_visual_task(self, target_url: str, task: str) -> Dict[str, Any]:
+        # Typically the operator start_url is set before, but this is a simplified wrapper for IVision capability
+        self.instruction = task
+        self.operator.start_url = target_url
+        return await self.run()
     """UI-TARS görsel ajanı. max_step'i aşarsa veya eylem başarısızsa hata fırlatır."""
 
     def __init__(
