@@ -267,8 +267,8 @@ async def scrape_target(
                     return cached_data
                 else:
                     logger.info("Önbellek süresi dolmuş (TTL > 24h), yeniden çekiliyor: %s", cache_key)
-            except ValueError:
-                logger.warning("Geçersiz scraped_at formatı, yeniden çekiliyor: %s", cache_key)
+            except Exception as e:
+                logger.warning("scraped_at okuma hatası (%s), yeniden çekiliyor: %s", e, cache_key)
         else:
             logger.info("scraped_at bulunamadı, yeniden çekiliyor: %s", cache_key)
 
