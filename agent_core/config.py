@@ -40,6 +40,12 @@ class Settings:
     session_store_path: str = field(default_factory=lambda: _env("SESSION_STORE_PATH", "./data/sessions.json"))
     session_store_key: str = field(default_factory=lambda: _env("SESSION_STORE_KEY", ""))
 
+    # LLM Gateway (LiteLLM :4000 — tüm LLM çağrıları buradan geçer)
+    llm_gateway_url: str = field(default_factory=lambda: _env("LLM_GATEWAY_URL", "http://localhost:4000/v1"))
+    llm_gateway_api_key: str = field(default_factory=lambda: _env("LITELLM_MASTER_KEY", _env("LLM_GATEWAY_API_KEY", "")))
+    llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "deepseek-chat"))
+    llm_fallback_model: str = field(default_factory=lambda: _env("LLM_FALLBACK_MODEL", "openrouter-chat"))
+
     # Genel
     http_timeout: float = field(default_factory=lambda: float(_env("HTTP_TIMEOUT", "120")))
     max_retries: int = field(default_factory=lambda: int(_env("MAX_RETRIES", "3")))

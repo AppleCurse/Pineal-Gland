@@ -11,14 +11,18 @@ işaretlenir ve sistem durmaz):
     5. UI-TARS    : görsel görev verilmişse piksel tabanlı ajanı çalıştır
     6. SESSION    : platform/hesap verilmişse şifreli oturumu kaydet/yenile
     7. FINISH     : özet + sonuç döndür
+
+Dependency Injection: tüm servis istemcileri constructor'dan alinir.
+Yarin Agent-Zero yerine baska orchestrator takmak tek satir degisikliktir.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Protocol
 
 from config import Settings
 from services.agent_zero import AgentZeroClient
@@ -29,6 +33,7 @@ from services.scraper import scrape_target
 from services.session_store import SessionStore
 from services.uitars import GUIAgent, PlaywrightOperator, UITarsModelClient
 from services.analyzer import ProfileAnalyzer
+from services.llm_gateway import LLMGateway
 from resonance_graph import create_resonance_graph
 
 logger = logging.getLogger("agent_core.orchestrator")
@@ -38,17 +43,110 @@ class OrchestratorError(RuntimeError):
     pass
 
 
-class Orchestrator:
-    def __init__(self, settings: Settings):
-        self.settings = settings
-        self.az = AgentZeroClient(
+# ---------------------------------------------------------------------------
+# Service protocols — bagimliliklari soyutlar
+# ---------------------------------------------------------------------------
+
+
+class AgentOrchestratorProtocol(Protocol):
+    """Herhangi bir alt-ajan orkestratorunun uymasi gereken kontrat."""
+
+    async def send_message(self, message: str, context_id: Optional[str] = None,
+                           agent_profile: Optional[str] = None) -> Dict[str, Any]: ...
+    async def health(self) -> bool: ...
+
+
+class ResearchClientProtocol(Protocol):
+    """Derin arastirma istemcisi kontrati."""
+
+    async def run_research(self, query: str, assistant_id: Optional[str] = None,
+                           context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
+    async def health(self) -> bool: ...
+
+
+class PersonaClientProtocol(Protocol):
+    """Persona + RAG hafiza istemcisi kontrati."""
+
+    async def recall(self, room_id: str) -> str: ...
+    async def get_agents(self) -> Any: ...
+    async def health(self) -> bool: ...
+
+
+class ProfileAnalyzerProtocol(Protocol):
+    """Profil analiz servisi kontrati."""
+
+    async def analyze(self, scraped_data: Dict[str, Any]) -> Dict[str, Any]: ...
+
+
+# ---------------------------------------------------------------------------
+# Service container (DI)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ServiceContainer:
+    """Tum servis bagimliliklarini tek bir yerde toplar.
+
+    Orchestrator bu container'daki servisleri kullanir.
+    Her servis opsiyoneldir — None ise o adim atlanir.
+    """
+
+    agent_orchestrator: Optional[AgentOrchestratorProtocol] = None
+    research_client: Optional[ResearchClientProtocol] = None
+    persona_client: Optional[PersonaClientProtocol] = None
+    profile_analyzer: Optional[ProfileAnalyzerProtocol] = None
+    session_store: Optional[SessionStore] = None
+    llm_gateway: Optional[LLMGateway] = None
+
+
+def build_default_services(settings: Settings) -> ServiceContainer:
+    """Settings'ten varsayilan servis istemcilerini olusturur."""
+    return ServiceContainer(
+        agent_orchestrator=AgentZeroClient(
             settings.agent_zero_url, settings.agent_zero_api_key,
             timeout=settings.http_timeout, max_retries=settings.max_retries,
-        )
-        self.df = DeerFlowClient(settings.deerflow_url, timeout=settings.http_timeout * 2)
-        self.eliza = ElizaClient(settings.eliza_url, settings.eliza_agent_id, settings.eliza_token)
-        self.sessions = SessionStore(settings.session_store_path, settings.session_store_key)
-        self.analyzer = ProfileAnalyzer()
+        ),
+        research_client=DeerFlowClient(
+            settings.deerflow_url, timeout=settings.http_timeout * 2,
+        ),
+        persona_client=ElizaClient(
+            settings.eliza_url, settings.eliza_agent_id, settings.eliza_token,
+        ),
+        profile_analyzer=ProfileAnalyzer(
+            gateway=LLMGateway(
+                base_url=settings.llm_gateway_url,
+                api_key=settings.llm_gateway_api_key,
+                model=settings.llm_model,
+                fallback_model=settings.llm_fallback_model,
+            ),
+        ),
+        session_store=SessionStore(
+            settings.session_store_path, settings.session_store_key,
+        ),
+    )
+
+
+class Orchestrator:
+    def __init__(self, settings: Settings, services: Optional[ServiceContainer] = None):
+        self.settings = settings
+        svc = services or build_default_services(settings)
+
+        # Agent orkestratoru (Agent-Zero veya muadili)
+        self.az = svc.agent_orchestrator
+
+        # Derin arastirma (Deer-Flow veya muadili)
+        self.df = svc.research_client
+
+        # Persona + hafiza (ElizaOS veya muadili)
+        self.eliza = svc.persona_client
+
+        # Profil analiz (behavioral signal extractor)
+        self.analyzer = svc.profile_analyzer
+
+        # Oturum deposu
+        self.sessions = svc.session_store
+
+        # Altyapi servisleri (bunlar DI'den bagimsiz, hafif)
         self.limiter = FrequencyLimiter()
         self.handover = CockpitHandover()
         self.resonance_graph = create_resonance_graph()
@@ -77,11 +175,20 @@ class Orchestrator:
         logger.info("[%s] %s -> %s: %s", record["task_id"], name, status, detail)
 
     async def _service_health(self) -> Dict[str, bool]:
-        return {
-            "agent_zero": await self.az.health(),
-            "deerflow": await self.df.health(),
-            "eliza": await self.eliza.health(),
-        }
+        result: Dict[str, bool] = {}
+        if self.az:
+            result["agent_zero"] = await self.az.health()
+        else:
+            result["agent_zero"] = False
+        if self.df:
+            result["deerflow"] = await self.df.health()
+        else:
+            result["deerflow"] = False
+        if self.eliza:
+            result["eliza"] = await self.eliza.health()
+        else:
+            result["eliza"] = False
+        return result
 
     # ------------------------------------------------------------------
     async def run_pipeline(
@@ -108,38 +215,50 @@ class Orchestrator:
                     report["scraped_data"] = scraped_data
                     await self._step(record, "scraper", "ok", f"Hedef tarandı: {target} (takipçi: {scraped_data.get('followers')})")
 
-                    # Psikolojik profil analizi
+                    # Davranissal sinyal cikarimi (behavioral signal extraction)
+                    analyzed_profile = None
                     try:
-                        analyzed_profile = await self.analyzer.analyze(scraped_data)
-                        analyzed_profile["username"] = scraped_data.get("username")
-                        analyzed_profile["platform"] = scraped_data.get("platform")
-                        report["analyzed_profile"] = analyzed_profile
-                        await self._step(record, "analyzer", "ok", f"Profil analiz edildi: Rezonans {analyzed_profile.get('resonance_score')}")
+                        if self.analyzer:
+                            analyzed_profile = await self.analyzer.analyze(scraped_data)
+                            analyzed_profile["username"] = scraped_data.get("username")
+                            analyzed_profile["platform"] = scraped_data.get("platform")
+                            report["analyzed_profile"] = analyzed_profile
+                            confidence = analyzed_profile.get("overall_confidence", 0.0)
+                            await self._step(record, "analyzer", "ok",
+                                             f"Sinyal cikarimi tamamlandi: guven={confidence:.2f}")
+                        else:
+                            report["analyzed_profile"] = None
+                            await self._step(record, "analyzer", "unavailable", "Profil analiz servisi yapilandirilmamis")
 
                         # Rezonans motoru (LangGraph)
-                        try:
-                            current_account = account or "default"
-                            session_data = None
-                            if platform:
-                                session_data = self.sessions.load(platform, current_account)
+                        if analyzed_profile:
+                            try:
+                                current_account = account or "default"
+                                session_data = None
+                                if platform and self.sessions:
+                                    session_data = self.sessions.load(platform, current_account)
 
-                            cookies = session_data.get("cookies", []) if session_data else []
+                                cookies = session_data.get("cookies", []) if session_data else []
 
-                            initial_state = {
-                                "profile": analyzed_profile,
-                                "score": 0.0,
-                                "strategy": "",
-                                "messages_sent": 0,
-                                "handover_ready": False,
-                                "status": "init",
-                                "cookies": cookies,
-                            }
-                            graph_result = await self.resonance_graph.ainvoke(initial_state)
-                            report["resonance_engine"] = graph_result
-                            await self._step(record, "resonance_engine", "ok", f"Rezonans motoru çalıştı: strateji={graph_result.get('strategy')}")
-                        except Exception as exc:
+                                initial_state = {
+                                    "profile": analyzed_profile,
+                                    "score": 0.0,
+                                    "strategy": "",
+                                    "messages_sent": 0,
+                                    "handover_ready": False,
+                                    "status": "init",
+                                    "cookies": cookies,
+                                }
+                                graph_result = await self.resonance_graph.ainvoke(initial_state)
+                                report["resonance_engine"] = graph_result
+                                cv = graph_result.get("compatibility", {})
+                                await self._step(record, "resonance_engine", "ok",
+                                                 f"Rezonans: composite={cv.get('composite', 0):.2f}, strateji={graph_result.get('strategy')}")
+                            except Exception as exc:
+                                report["resonance_engine"] = None
+                                await self._step(record, "resonance_engine", "failed", f"Rezonans motoru hatası: {exc}")
+                        else:
                             report["resonance_engine"] = None
-                            await self._step(record, "resonance_engine", "failed", f"Rezonans motoru hatası: {exc}")
 
                     except Exception as exc:
                         report["analyzed_profile"] = None
@@ -152,43 +271,55 @@ class Orchestrator:
 
             # 2. ELIZA — persona bağlamı
             room = target or intent[:40]
-            try:
-                ctx = await self.eliza.recall(room)
-                report["eliza_context"] = ctx
-                await self._step(record, "eliza", "ok",
-                                 f"Persona hafızası okundu (room={room}, {len(ctx)} karakter)")
-            except Exception as exc:
+            if self.eliza:
+                try:
+                    ctx = await self.eliza.recall(room)
+                    report["eliza_context"] = ctx
+                    await self._step(record, "eliza", "ok",
+                                     f"Persona hafızası okundu (room={room}, {len(ctx)} karakter)")
+                except Exception as exc:
+                    report["eliza_context"] = None
+                    await self._step(record, "eliza", "unavailable", f"Eliza erişilemedi: {exc}")
+            else:
                 report["eliza_context"] = None
-                await self._step(record, "eliza", "unavailable", f"Eliza erişilemedi: {exc}")
+                await self._step(record, "eliza", "unavailable", "Persona servisi yapilandirilmamis")
 
             # 3. DEER-FLOW — uzun bağlamlı analiz
-            query = f"Kültürel frekans analizi hedefi: {target or intent}"
-            try:
-                research = await self.df.run_research(query, self.settings.deerflow_assistant_id)
-                report["research"] = research
-                await self._step(record, "deerflow", "ok",
-                                 f"Derin analiz tamamlandı (thread={research.get('thread_id')})")
-            except Exception as exc:
+            if self.df:
+                query = f"Kültürel frekans analizi hedefi: {target or intent}"
+                try:
+                    research = await self.df.run_research(query, self.settings.deerflow_assistant_id)
+                    report["research"] = research
+                    await self._step(record, "deerflow", "ok",
+                                     f"Derin analiz tamamlandı (thread={research.get('thread_id')})")
+                except Exception as exc:
+                    report["research"] = None
+                    await self._step(record, "deerflow", "unavailable", f"Deer-Flow erişilemedi: {exc}")
+            else:
                 report["research"] = None
-                await self._step(record, "deerflow", "unavailable", f"Deer-Flow erişilemedi: {exc}")
+                await self._step(record, "deerflow", "unavailable", "Derin analiz servisi yapilandirilmamis")
 
             # 4. AGENT-ZERO — ana orkestratöre emir (iç alt-ajanları o yönetir)
-            command = (
-                f"Yeni görev. Niyet: {intent}\n"
-                f"Hedef: {target or 'belirtilmedi'}\n"
-                f"Derin analiz raporu: {str(report.get('research'))[:800]}\n"
-                f"Persona bağlamı: {str(report.get('eliza_context'))[:400]}\n"
-                "Bu görev için gerekli alt-ajanları dinamik olarak oluştur, işi "
-                "yürüt ve tamamlanınca sonlandır. Sonucu raporla."
-            )
-            try:
-                az_result = await self.az.send_message(command, agent_profile="default")
-                report["agent_zero"] = az_result
-                await self._step(record, "agent_zero", "ok",
-                                 f"Orkestrasyon yanıtı alındı (context={az_result.get('context_id')})")
-            except Exception as exc:
+            if self.az:
+                command = (
+                    f"Yeni görev. Niyet: {intent}\n"
+                    f"Hedef: {target or 'belirtilmedi'}\n"
+                    f"Derin analiz raporu: {str(report.get('research'))[:800]}\n"
+                    f"Persona bağlamı: {str(report.get('eliza_context'))[:400]}\n"
+                    "Bu görev için gerekli alt-ajanları dinamik olarak oluştur, işi "
+                    "yürüt ve tamamlanınca sonlandır. Sonucu raporla."
+                )
+                try:
+                    az_result = await self.az.send_message(command, agent_profile="default")
+                    report["agent_zero"] = az_result
+                    await self._step(record, "agent_zero", "ok",
+                                     f"Orkestrasyon yanıtı alındı (context={az_result.get('context_id')})")
+                except Exception as exc:
+                    report["agent_zero"] = None
+                    await self._step(record, "agent_zero", "unavailable", f"Agent-Zero erişilemedi: {exc}")
+            else:
                 report["agent_zero"] = None
-                await self._step(record, "agent_zero", "unavailable", f"Agent-Zero erişilemedi: {exc}")
+                await self._step(record, "agent_zero", "unavailable", "Agent orkestratoru yapilandirilmamis")
 
             # 5. UI-TARS — piksel tabanlı görsel görev
             if visual_task:
@@ -205,16 +336,20 @@ class Orchestrator:
                     await self._step(record, "uitars", "unavailable", f"UI-TARS çalışamadı: {exc}")
 
             # 6. SESSION — şifreli oturum (varsa)
-            if platform and account:
-                existing = self.sessions.load(platform, account)
-                if existing:
-                    await self._step(record, "session", "ok",
-                                     f"Oturum yüklendi ({platform}/{account}, {len(existing.get('cookies', {}))} çerez)")
-                    report["session"] = {"loaded": True, "platform": platform, "account": account}
-                else:
-                    await self._step(record, "session", "ok",
-                                     f"Oturum bulunamadı ({platform}/{account}) — canlı giriş gerekli")
-                    report["session"] = {"loaded": False, "platform": platform, "account": account}
+            if platform and account and self.sessions:
+                try:
+                    existing = self.sessions.load(platform, account)
+                    if existing:
+                        await self._step(record, "session", "ok",
+                                         f"Oturum yüklendi ({platform}/{account}, {len(existing.get('cookies', {}))} çerez)")
+                        report["session"] = {"loaded": True, "platform": platform, "account": account}
+                    else:
+                        await self._step(record, "session", "ok",
+                                         f"Oturum bulunamadı ({platform}/{account}) — canlı giriş gerekli")
+                        report["session"] = {"loaded": False, "platform": platform, "account": account}
+                except Exception as exc:
+                    await self._step(record, "session", "unavailable", f"Oturum deposu hatası: {exc}")
+                    report["session"] = {"loaded": False, "error": str(exc)}
 
             # 7. FINISH
             record["status"] = "finished"

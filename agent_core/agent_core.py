@@ -170,6 +170,8 @@ async def health():
 
 @app.get("/agents")
 async def list_agents():
+    if not orch.eliza:
+        return {"error": "Persona servisi yapilandirilmamis"}
     try:
         agents = await orch.eliza.get_agents()
         return {"agents": agents}
@@ -179,6 +181,8 @@ async def list_agents():
 
 @app.get("/sessions")
 async def list_sessions(platform: Optional[str] = None):
+    if not orch.sessions:
+        return {"error": "Oturum deposu yapilandirilmamis"}
     try:
         accounts = orch.sessions.list_accounts(platform)
         return {"accounts": accounts}

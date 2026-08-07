@@ -1,104 +1,220 @@
 """
-Profile Analyzer Service — Psikolojik Profil Analizi.
+Profile Analyzer Service — Behavioral Signal Extraction.
 
-Claude API kullanarak hedeflenen profillerin psikolojik analizini yapar,
-json olarak döndürür: dominant_emotion, achilles_heel, trigger_words, resonance_score.
+Gozlemlenebilir iletisim oruntulerini cikarir.
+Asla teshis koymaz, asla mental durum cikarmaz.
+Yalnizca gozlemlenebilir sinyalleri tanimlar ve her sinyal icin guven skoru uretir.
+
+Cikti: CommunicationSignals, TopicAffinity, PostingPattern, InteractionPattern.
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
-import re
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-import httpx
 from pydantic import BaseModel, Field
+
+from services.llm_gateway import LLMGateway, get_llm_gateway
 
 logger = logging.getLogger("agent_core.analyzer")
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "anthropic/claude-sonnet-5"
+# ---------------------------------------------------------------------------
+# Behavioral Signal Schemas
+# ---------------------------------------------------------------------------
 
 
-class PsychologicalProfile(BaseModel):
-    dominant_emotion: str = Field(..., description="Baskın duygu hali")
-    achilles_heel: str = Field(..., description="Zayıf nokta / Aşil tendonu")
-    trigger_words: List[str] = Field(..., description="Tetikleyici kelimeler (3-5 adet)")
-    resonance_score: float = Field(..., description="Rezonans skoru (0-10 arası, uygunluk)")
+class CommunicationSignals(BaseModel):
+    """Gozlemlenebilir iletisim tarzi sinyalleri."""
+
+    tone_style: str = Field(
+        ...,
+        description="One of: assertive, collaborative, questioning, declarative, narrative, instructional, provocative, reflective, dry_humor, earnest, sarcastic",
+    )
+    language_complexity: str = Field(
+        ..., description="One of: simple, moderate, complex, mixed"
+    )
+    emotional_expressiveness: str = Field(
+        ..., description="One of: reserved, balanced, expressive, highly_expressive"
+    )
+    confidence: float = Field(..., ge=0.0, le=1.0, description="How certain the LLM is about this classification (0-1)")
+    stability: float = Field(..., ge=0.0, le=1.0, description="How consistent this signal is across the sample (0-1). Low stability = based on few posts, may change.")
+    evidence: List[str] = Field(
+        default_factory=list,
+        description="Specific observable examples supporting this classification (e.g. '7/12 posts use ironic contrast', 'bio contains self-deprecating humor')",
+    )
 
 
-SYSTEM_PROMPT = """Sen uzman bir psikolojik profil analizcisisin.
-Kullanıcının gönderdiği sosyal medya verilerini (bio ve son gönderiler) analiz ederek,
-kullanıcının psikolojik profilini çıkaracaksın.
-Çıktını sadece aşağıdaki JSON formatında üret. Başka hiçbir şey yazma.
+class TopicAffinity(BaseModel):
+    """Gozlemlenebilir konu egilimleri."""
 
-{
-  "dominant_emotion": "<Baskın duygu hali, 1-2 kelime>",
-  "achilles_heel": "<Zayıf nokta, Aşil tendonu, güvensizlik veya ihtiyaç duyulan şey>",
-  "trigger_words": ["<kelime1>", "<kelime2>", "<kelime3>"],
-  "resonance_score": <0.0 ile 10.0 arası bir sayı>
-}"""
+    primary_themes: List[str] = Field(
+        ..., description="Top 3-5 observable themes (e.g. technology, fitness, politics, art)"
+    )
+    theme_confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in theme classification")
+    emotional_valence: str = Field(
+        ..., description="Overall emotional valence: positive, negative, neutral, mixed"
+    )
+    stability: float = Field(..., ge=0.0, le=1.0, description="How consistent themes are across the sample")
+    evidence: List[str] = Field(
+        default_factory=list,
+        description="Specific posts or bio snippets that support theme classification",
+    )
+
+
+class PostingPattern(BaseModel):
+    """Gozlemlenebilir paylasim oruntuleri."""
+
+    frequency_indicator: str = Field(
+        ..., description="One of: frequent, moderate, sparse, episodic"
+    )
+    content_type_mix: List[str] = Field(
+        ..., description="Content types: personal, professional, curated, reactive, promotional, educational, entertainment"
+    )
+    engagement_seeking_level: str = Field(
+        ..., description="One of: low, moderate, high"
+    )
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in this signal set (0-1)")
+    stability: float = Field(..., ge=0.0, le=1.0, description="How consistent posting behavior is across the sample")
+    evidence: List[str] = Field(
+        default_factory=list,
+        description="Observed posting behaviors supporting this classification",
+    )
+
+
+class InteractionPattern(BaseModel):
+    """Gozlemlenebilir etkilesim oruntuleri."""
+
+    response_style: str = Field(
+        ..., description="One of: reciprocating, initiating, observational, selective"
+    )
+    community_orientation: str = Field(
+        ..., description="One of: individual_focused, community_focused, mixed"
+    )
+    conflict_engagement: str = Field(
+        ..., description="One of: avoidant, diplomatic, direct, confrontational"
+    )
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in this signal set (0-1)")
+    stability: float = Field(..., ge=0.0, le=1.0, description="How consistent interaction patterns are across the sample")
+    evidence: List[str] = Field(
+        default_factory=list,
+        description="Specific interaction examples observed in the data",
+    )
+
+
+class BehavioralProfile(BaseModel):
+    """Tam davranissal sinyal profili."""
+
+    schema_version: str = Field(default="1.1", description="Schema version for forward compatibility")
+    communication_signals: CommunicationSignals
+    topic_affinity: TopicAffinity
+    posting_pattern: PostingPattern
+    interaction_pattern: InteractionPattern
+    overall_confidence: float = Field(..., ge=0.0, le=1.0, description="Aggregate confidence across all signals")
+    sample_size: int = Field(..., ge=0, description="Number of data points analyzed (posts, bio lines, etc.)")
+    period_days: Optional[float] = Field(default=None, description="Time span of observed data in days, if known")
+    extraction_timestamp: str = Field(..., description="ISO 8601 extraction time")
+
+
+# ---------------------------------------------------------------------------
+# System Prompt (strict guardrails)
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """You are a behavioral signal extractor.
+
+Your job is to describe observable communication patterns from social media data.
+You work ONLY with what is directly observable in the provided text.
+
+CRITICAL RULES:
+- NEVER diagnose. You are not a clinician.
+- NEVER infer mental illness, disorders, or psychological conditions.
+- NEVER infer trauma, abuse history, or personal suffering.
+- NEVER use psychological labels (narcissistic, depressed, anxious, bipolar, etc.).
+- ONLY describe observable communication patterns and content themes.
+
+For EVERY signal, return TWO scores:
+  - "confidence" (0-1): How certain you are about this classification.
+  - "stability" (0-1): How CONSISTENT this signal is across the sample.
+    High stability = the pattern appears in most posts consistently.
+    Low stability = the pattern appears in only 1-2 posts and may not hold.
+
+For EVERY signal, include "evidence": specific, quotable examples from the data
+that justify your classification. E.g. "5/10 posts mention AI/ML topics",
+"bio line: 'building the future of work'", "replies use irony in 6/8 exchanges".
+Evidence is NOT optional — every signal decision must be traceable to the source.
+
+For "sample_size": count all analyzed data points (posts + bio + interactions).
+For "period_days": estimate the time span if post dates suggest it, otherwise null.
+
+You are an engineer extracting structured signals from unstructured text. Nothing more."""
+
+
+# ---------------------------------------------------------------------------
+# Profile Analyzer
+# ---------------------------------------------------------------------------
+
 
 class ProfileAnalyzer:
+    """Sosyal medya verisinden gozlemlenebilir davranissal sinyalleri cikarir.
+
+    LLM cagrilari LLMGateway uzerinden yapilir — hangi model oldugu analyzer'i
+    ilgilendirmez.
+    """
+
+    def __init__(self, gateway: Optional[LLMGateway] = None):
+        self.gateway = gateway or get_llm_gateway()
+
     async def analyze(self, scraped_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Scraper'dan gelen veriyi analiz eder ve psikolojik profil döner."""
+        """Scraper'dan gelen veriyi analiz eder ve BehavioralProfile dondurur."""
         if not scraped_data:
             return {}
 
         bio = scraped_data.get("bio", "")
-        posts = "\n".join(scraped_data.get("recent_posts", [])[:10])
+        posts_list = scraped_data.get("recent_posts", [])[:10]
+        posts = "\n".join(posts_list)
         followers = scraped_data.get("followers", "N/A")
 
-        content = f"Profil Bio: {bio}\nTakipçi: {followers}\nSon Gönderiler:\n{posts}"
-        logger.info(f"Profil analizi başlıyor (Bio uzunluğu: {len(bio)}, Gönderi sayısı: {len(scraped_data.get('recent_posts', []))})")
+        content = f"Profile Bio: {bio}\nFollowers: {followers}\nRecent Posts:\n{posts}"
+        logger.info(
+            "Davranissal sinyal cikarimi basliyor (bio=%d chars, posts=%d)",
+            len(bio), len(posts_list),
+        )
 
-        payload = {
-            "model": MODEL,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Şu profil verilerini analiz et:\n\n{content}"},
-            ],
-            "temperature": 0.3,
-            "max_tokens": 512,
-        }
-
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:5060",
-            "X-Title": "DijitalVarlik-AgentCore",
-        }
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    f"Extract behavioral communication signals from this social media profile.\n\n"
+                    f"{content}\n\n"
+                    f"Remember: only observable patterns, no diagnosis, no inference of mental state."
+                ),
+            },
+        ]
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(OPENROUTER_URL, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
+            profile = await self.gateway.chat_and_parse(
+                messages=messages,
+                schema=BehavioralProfile,
+                system=SYSTEM_PROMPT,
+                temperature=0.3,
+                max_tokens=1024,
+            )
+            result = profile.model_dump()
+            logger.info(
+                "Sinyal cikarimi tamamlandi (overall_confidence=%.2f, themes=%s)",
+                profile.overall_confidence,
+                profile.topic_affinity.primary_themes,
+            )
+            return result
 
-            raw_json_str = data["choices"][0]["message"]["content"]
-
-            # JSON parse
-            try:
-                parsed = json.loads(raw_json_str)
-            except json.JSONDecodeError:
-                m = re.search(r"\{.*\}", raw_json_str, re.DOTALL)
-                if m:
-                    parsed = json.loads(m.group(0))
-                else:
-                    raise ValueError(f"Geçerli JSON bulunamadı:\n{raw_json_str[:200]}")
-
-            # Pydantic validation
-            profile = PsychologicalProfile(**parsed)
-            return profile.model_dump()
-
-        except Exception as e:
-            logger.error(f"Profil analizi sırasında hata oluştu: {e}")
+        except Exception as exc:
+            logger.error("Sinyal cikarimi basarisiz: %s", exc)
             return {
-                "dominant_emotion": "Bilinmiyor",
-                "achilles_heel": "Bilinmiyor",
-                "trigger_words": [],
-                "resonance_score": 0.0,
-                "error": str(e)
+                "communication_signals": None,
+                "topic_affinity": None,
+                "posting_pattern": None,
+                "interaction_pattern": None,
+                "overall_confidence": 0.0,
+                "extraction_timestamp": datetime.now(timezone.utc).isoformat(),
+                "error": str(exc),
             }
