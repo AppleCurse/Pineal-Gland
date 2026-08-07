@@ -35,6 +35,7 @@ from services.uitars import GUIAgent, PlaywrightOperator, UITarsModelClient
 from services.analyzer import ProfileAnalyzer
 from services.llm_gateway import LLMGateway
 from services.memory_manager import MemoryManager
+from services.uncertainty import evaluate_profile
 from resonance_graph import create_resonance_graph
 
 logger = logging.getLogger("agent_core.orchestrator")
@@ -196,6 +197,42 @@ class Orchestrator:
         return result
 
     # ------------------------------------------------------------------
+
+    def _plan(self, intent: str, target: Optional[str]) -> Dict[str, bool]:
+        """Görev niyetine göre hangi servislerin çalışacağını belirler."""
+        intent_lower = (intent or "").lower()
+
+        need_persona = False
+        need_research = False
+        need_orchestration = False
+
+        if not intent and not target:
+            return {"need_persona": False, "need_research": False, "need_orchestration": False}
+
+        if "araştır" in intent_lower or "research" in intent_lower or "derin analiz" in intent_lower:
+            need_persona = True
+            need_research = True
+            need_orchestration = False
+        elif "konuş" in intent_lower or "etkileş" in intent_lower or "mesaj" in intent_lower or "interact" in intent_lower:
+            need_persona = True
+            need_research = False
+            need_orchestration = True
+        elif "analiz" in intent_lower or "tara" in intent_lower or "scan" in intent_lower:
+            need_persona = False
+            need_research = False
+            need_orchestration = False
+        elif target:
+             # Default if there is a target but no specific keyword
+             need_persona = False
+             need_research = False
+             need_orchestration = False
+
+        return {
+            "need_persona": need_persona,
+            "need_research": need_research,
+            "need_orchestration": need_orchestration
+        }
+
     async def run_pipeline(
         self,
         intent: str,
@@ -211,6 +248,7 @@ class Orchestrator:
         try:
             # 1. INTENT & SCRAPE
             await self._step(record, "intent", "ok", f"Görev kaydedildi: {intent}")
+            plan = self._plan(intent, target)
             if target:
                 report["target"] = target
                 # Frekans ve ısınma kontrolü
@@ -242,6 +280,25 @@ class Orchestrator:
 
                             await self._step(record, "analyzer", "ok",
                                              f"Sinyal cikarimi tamamlandi: guven={confidence:.2f}")
+
+                            # COLLECT_MORE auto-retry logic
+                            uncertainty_report = evaluate_profile(analyzed_profile)
+                            if uncertainty_report.collect_more_count > 0:
+                                await self._step(record, "analyzer_retry", "info", f"COLLECT_MORE ({uncertainty_report.collect_more_count} signals). Yeniden taraniyor...")
+                                scraped_data = await scrape_target(target, platform, force_refresh=True)
+                                report["scraped_data_retry"] = scraped_data
+                                analyzed_profile = await self.analyzer.analyze(scraped_data)
+                                analyzed_profile["username"] = scraped_data.get("username")
+                                analyzed_profile["platform"] = scraped_data.get("platform")
+                                report["analyzed_profile_retry"] = analyzed_profile
+
+                                uncertainty_report_2 = evaluate_profile(analyzed_profile)
+                                if uncertainty_report_2.collect_more_count > 0:
+                                    report["retry_status"] = "still_insufficient"
+                                    await self._step(record, "analyzer_retry", "warn", "İkinci taramada da COLLECT_MORE.")
+                                else:
+                                    report["retry_status"] = "resolved"
+                                    await self._step(record, "analyzer_retry", "ok", "İkinci tarama yeterli.")
                         else:
                             report["analyzed_profile"] = None
                             await self._step(record, "analyzer", "unavailable", "Profil analiz servisi yapilandirilmamis")
@@ -287,7 +344,7 @@ class Orchestrator:
 
             # 2. ELIZA — persona bağlamı
             room = target or intent[:40]
-            if self.eliza:
+            if self.eliza and plan.get("need_persona"):
                 try:
                     ctx = await self.eliza.recall(room)
                     report["eliza_context"] = ctx
@@ -301,7 +358,7 @@ class Orchestrator:
                 await self._step(record, "eliza", "unavailable", "Persona servisi yapilandirilmamis")
 
             # 3. DEER-FLOW — uzun bağlamlı analiz
-            if self.df:
+            if self.df and plan.get("need_research"):
                 query = f"Kültürel frekans analizi hedefi: {target or intent}"
                 try:
                     research = await self.df.run_research(query, self.settings.deerflow_assistant_id)
@@ -316,7 +373,7 @@ class Orchestrator:
                 await self._step(record, "deerflow", "unavailable", "Derin analiz servisi yapilandirilmamis")
 
             # 4. AGENT-ZERO — ana orkestratöre emir (iç alt-ajanları o yönetir)
-            if self.az:
+            if self.az and plan.get("need_orchestration"):
                 command = (
                     f"Yeni görev. Niyet: {intent}\n"
                     f"Hedef: {target or 'belirtilmedi'}\n"
