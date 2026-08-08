@@ -898,4 +898,7 @@ if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print("[START] Ajan Kokpiti baslatiliyor...")
     print("[URL]   http://localhost:5050")
-    uvicorn.run(app, host="0.0.0.0", port=5050)
+    # Güvenlik: Varsayılan olarak sadece localhost'a bağlan
+    # Production'da reverse proxy + authentication kullanılmalı
+    host = os.getenv("COCKPIT_HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=5050)

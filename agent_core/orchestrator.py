@@ -1,16 +1,13 @@
-"""Kapalı devre orkestratörü.
+"""Kapalı devre orkestratör.
 
 Pipeline (her adım loglanır; servis ayakta değilse adım "unavailable" olarak
 işaretlenir ve sistem durmaz):
 
     1. INTENT     : görevin kaydı
-    2. ELIZA      : persona + RAG hafızasından hedef bağlamı çek
-    3. DEER-FLOW  : uzun bağlamlı derin analiz raporu üret
-    4. AGENT-ZERO : emri (rapor+bağlam ile) ana orkestratöre ilet; iç dinamik
-                    alt-ajanları o kendi yaratır
-    5. UI-TARS    : görsel görev verilmişse piksel tabanlı ajanı çalıştır
-    6. SESSION    : platform/hesap verilmişse şifreli oturumu kaydet/yenile
-    7. FINISH     : özet + sonuç döndür
+    2. PLAN       : routing + validation planı
+    3. EXECUTION  : servis çağrıları (Eliza, DeerFlow, Analyzer, Resonance)
+    4. VALIDATION : sonuç doğrulama (COLLECT_MORE döngüsü dahil)
+    5. SUCCESS/FAILED/PARTIAL : gerçek durum
 
 Dependency Injection: tüm servis istemcileri constructor'dan alinir.
 Yarin Agent-Zero yerine baska orchestrator takmak tek satir degisikliktir.
@@ -18,10 +15,12 @@ Yarin Agent-Zero yerine baska orchestrator takmak tek satir degisikliktir.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional, Protocol
 
 from config import Settings
@@ -34,12 +33,74 @@ from services.session_store import SessionStore
 from services.uitars import GUIAgent, PlaywrightOperator, UITarsModelClient
 from services.analyzer import ProfileAnalyzer
 from services.llm_gateway import LLMGateway
-from services.memory_manager import MemoryManager
-from services.registry import CapabilityRegistry, ICodeExecution, IDeepResearch, IPersona, IVision
-from services.event_bus import get_event_bus
+from services.memory_delta import record_profile
 from resonance_graph import create_resonance_graph
 
 logger = logging.getLogger("agent_core.orchestrator")
+
+
+# ---------------------------------------------------------------------------
+# Task State Persistence — RAM'den kalıcı depolamaya geçiş
+# ---------------------------------------------------------------------------
+
+class TaskStateStore:
+    """Task state'leri kalıcı olarak saklar (JSON dosya).
+
+    Process restart sonrası task history kaybolmaz.
+    """
+
+    def __init__(self, storage_path: str = "./data/task_state.json"):
+        self.storage_path = Path(storage_path)
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = asyncio.Lock()
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._load_from_disk()
+
+    def _load_from_disk(self) -> None:
+        """Diskten state yükle."""
+        if self.storage_path.exists():
+            try:
+                with open(self.storage_path, "r", encoding="utf-8") as f:
+                    self._cache = json.load(f)
+                logger.info("Task state store yüklendi: %d task", len(self._cache))
+            except Exception as exc:
+                logger.warning("Task state load hatası: %s — boş cache ile başlıyor", exc)
+                self._cache = {}
+        else:
+            self._cache = {}
+
+    async def save_to_disk(self) -> None:
+        """Cache'i diske yaz."""
+        async with self._lock:
+            try:
+                with open(self.storage_path, "w", encoding="utf-8") as f:
+                    json.dump(self._cache, f, indent=2, ensure_ascii=False)
+                logger.debug("Task state store kaydedildi: %d task", len(self._cache))
+            except Exception as exc:
+                logger.error("Task state save hatası: %s", exc)
+
+    async def set_task(self, task_id: str, record: Dict[str, Any]) -> None:
+        """Task state güncelle ve diske yaz."""
+        async with self._lock:
+            self._cache[task_id] = record
+        await self.save_to_disk()
+
+    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Task state oku."""
+        return self._cache.get(task_id)
+
+    def list_tasks(self) -> Dict[str, Dict[str, Any]]:
+        """Tüm taskları listele."""
+        return dict(self._cache)
+
+    async def delete_task(self, task_id: str) -> bool:
+        """Task sil."""
+        async with self._lock:
+            if task_id in self._cache:
+                del self._cache[task_id]
+                await self.save_to_disk()
+                return True
+        return False
 
 
 class OrchestratorError(RuntimeError):
@@ -91,32 +152,30 @@ class ServiceContainer:
     """Tum servis bagimliliklarini tek bir yerde toplar.
 
     Orchestrator bu container'daki servisleri kullanir.
+    Her servis opsiyoneldir — None ise o adim atlanir.
     """
-    registry: CapabilityRegistry
+
+    agent_orchestrator: Optional[AgentOrchestratorProtocol] = None
+    research_client: Optional[ResearchClientProtocol] = None
+    persona_client: Optional[PersonaClientProtocol] = None
     profile_analyzer: Optional[ProfileAnalyzerProtocol] = None
     session_store: Optional[SessionStore] = None
-    memory_manager: Optional[MemoryManager] = None
     llm_gateway: Optional[LLMGateway] = None
 
 
 def build_default_services(settings: Settings) -> ServiceContainer:
     """Settings'ten varsayilan servis istemcilerini olusturur."""
-    reg = CapabilityRegistry()
-
-    # Register capabilities instead of hardcoded agents
-    reg.register(ICodeExecution, AgentZeroClient(
-        settings.agent_zero_url, settings.agent_zero_api_key,
-        timeout=settings.http_timeout, max_retries=settings.max_retries,
-    ))
-    reg.register(IDeepResearch, DeerFlowClient(
-        settings.deerflow_url, timeout=settings.http_timeout * 2,
-    ))
-    reg.register(IPersona, ElizaClient(
-        settings.eliza_url, settings.eliza_agent_id, settings.eliza_token,
-    ))
-
     return ServiceContainer(
-        registry=reg,
+        agent_orchestrator=AgentZeroClient(
+            settings.agent_zero_url, settings.agent_zero_api_key,
+            timeout=settings.http_timeout, max_retries=settings.max_retries,
+        ),
+        research_client=DeerFlowClient(
+            settings.deerflow_url, timeout=settings.http_timeout * 2,
+        ),
+        persona_client=ElizaClient(
+            settings.eliza_url, settings.eliza_agent_id, settings.eliza_token,
+        ),
         profile_analyzer=ProfileAnalyzer(
             gateway=LLMGateway(
                 base_url=settings.llm_gateway_url,
@@ -128,8 +187,6 @@ def build_default_services(settings: Settings) -> ServiceContainer:
         session_store=SessionStore(
             settings.session_store_path, settings.session_store_key,
         ),
-        memory_manager=MemoryManager(
-        ),
     )
 
 
@@ -138,100 +195,33 @@ class Orchestrator:
         self.settings = settings
         svc = services or build_default_services(settings)
 
-        self.registry = svc.registry
+        # Agent orkestratoru (Agent-Zero veya muadili)
+        self.az = svc.agent_orchestrator
+
+        # Derin arastirma (Deer-Flow veya muadili)
+        self.df = svc.research_client
+
+        # Persona + hafiza (ElizaOS veya muadili)
+        self.eliza = svc.persona_client
 
         # Profil analiz (behavioral signal extractor)
         self.analyzer = svc.profile_analyzer
 
         # Oturum deposu
         self.sessions = svc.session_store
-        self.memory = svc.memory_manager
-
-        self.event_bus = get_event_bus()
 
         # Altyapi servisleri (bunlar DI'den bagimsiz, hafif)
         self.limiter = FrequencyLimiter()
         self.handover = CockpitHandover()
         self.resonance_graph = create_resonance_graph()
-        self._tasks: Dict[str, Dict[str, Any]] = {}
+
+        # Task State Persistence — RAM yerine kalıcı depolama
+        task_state_path = getattr(settings, 'task_state_path', './data/task_state.json')
+        self.task_store = TaskStateStore(task_state_path)
         self._lock = asyncio.Lock()
 
-        # Register Event Handlers
-        asyncio.create_task(self._register_event_handlers())
-
-    async def _register_event_handlers(self):
-        """Asynchronously register handlers to the event bus."""
-        await self.event_bus.subscribe("PROFILE_ANALYZED", self._handle_profile_analyzed)
-        await self.event_bus.subscribe("MEMORY_UPDATED", self._handle_memory_updated)
-
-    async def _handle_profile_analyzed(self, event_type: str, payload: Dict[str, Any]) -> None:
-        """Otonom tepki: Profil analiz edildiginde hafizayi (memory) guncelle."""
-        if not self.memory:
-            return
-
-        task_id = payload.get("task_id")
-        profile = payload.get("profile")
-        if not task_id or not profile:
-            return
-
-        mem_res = self.memory.process_profile(
-            profile.get("platform", "unknown"),
-            profile.get("username", "unknown"),
-            profile
-        )
-        logger.info(f"[{task_id}] Event handler tetiklendi (Memory islendi): {mem_res.get('status')}")
-
-        # Zincirleme otonomi
-        await self.event_bus.emit("MEMORY_UPDATED", {
-            "task_id": task_id,
-            "profile": profile,
-            "memory_delta": mem_res,
-            "account": payload.get("account"),
-            "platform": payload.get("platform")
-        })
-
-    async def _handle_memory_updated(self, event_type: str, payload: Dict[str, Any]) -> None:
-        """Otonom tepki: Hafiza guncellendiginde LangGraph rezonans motorunu tetikle."""
-        task_id = payload.get("task_id")
-        profile = payload.get("profile")
-        platform = payload.get("platform")
-        account = payload.get("account")
-
-        if not task_id or not profile:
-            return
-
-        try:
-            current_account = account or "default"
-            session_data = None
-            if platform and self.sessions:
-                session_data = self.sessions.load(platform, current_account)
-
-            cookies = session_data.get("cookies", []) if session_data else []
-
-            initial_state = {
-                "profile": profile,
-                "score": 0.0,
-                "strategy": "",
-                "messages_sent": 0,
-                "handover_ready": False,
-                "status": "init",
-                "cookies": cookies,
-            }
-            # Start resonance logic autonomously
-            graph_result = await self.resonance_graph.ainvoke(initial_state)
-            cv = graph_result.get("compatibility", {})
-            logger.info(f"[{task_id}] Otonom Rezonans islendi: composite={cv.get('composite', 0):.2f}, strateji={graph_result.get('strategy')}")
-
-            # Record status via task store
-            record = self.get_task(task_id)
-            if record:
-                await self._step(record, "resonance_engine", "ok", f"Rezonans otonom islendi: strateji={graph_result.get('strategy')}")
-
-        except Exception as exc:
-            logger.error(f"[{task_id}] Otonom Rezonans motoru hatasi: {exc}")
-
     # ------------------------------------------------------------------
-    def register_task(self, task_id: str, intent: str) -> Dict[str, Any]:
+    async def register_task(self, task_id: str, intent: str) -> Dict[str, Any]:
         record = {
             "task_id": task_id,
             "intent": intent,
@@ -241,8 +231,9 @@ class Orchestrator:
             "finished_at": None,
             "result": None,
             "error": None,
+            "validation_status": None,  # SUCCESS, FAILED, PARTIAL, BLOCKED, NEEDS_HUMAN
         }
-        self._tasks[task_id] = record
+        await self.task_store.set_task(task_id, record)
         return record
 
     async def _step(self, record: Dict[str, Any], name: str, status: str, detail: str) -> None:
@@ -250,29 +241,63 @@ class Orchestrator:
                 "ts": datetime.now(timezone.utc).isoformat()}
         record["steps"].append(step)
         logger.info("[%s] %s -> %s: %s", record["task_id"], name, status, detail)
+        # Her adım sonrası state'i kalıcı hale getir
+        await self.task_store.set_task(record["task_id"], record)
 
     async def _service_health(self) -> Dict[str, bool]:
         result: Dict[str, bool] = {}
-        az = self.registry.get(ICodeExecution)
-        if az:
-            result["agent_zero"] = await az.health()
+        if self.az:
+            result["agent_zero"] = await self.az.health()
         else:
             result["agent_zero"] = False
-
-        df = self.registry.get(IDeepResearch)
-        if df:
-            result["deerflow"] = await df.health()
+        if self.df:
+            result["deerflow"] = await self.df.health()
         else:
             result["deerflow"] = False
-
-        eliza = self.registry.get(IPersona)
-        if eliza:
-            result["eliza"] = await eliza.health()
+        if self.eliza:
+            result["eliza"] = await self.eliza.health()
         else:
             result["eliza"] = False
         return result
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _plan(intent: str) -> Dict[str, Any]:
+        """Deterministic routing + plan: hangi servisler calisacak? (LLM yok)
+
+        Gerçek planlama adımları:
+        1. observe (scrape)
+        2. analyze (behavioral signals)
+        3. verify (uncertainty check)
+        4. research (opsiyonel, derin analiz)
+        5. generate (strategy)
+        6. human_approval (aksiyon öncesi)
+
+        Bu sadece routing filtresi, gerçek Planner değil.
+        """
+        intent_lower = (intent or "").lower()
+        words = intent_lower.split()
+        # Stem match: keyword herhangi bir kelimenin basinda/icinde var mi?
+        persona_kw = ["konus", "etkiles", "cevapla", "sohbet", "mesaj", "yorum", "karsilik", "diyalog"]
+        research_kw = ["arastir", "incele", "rapor", "karsilastir", "derinlemesine", "analiz"]
+        orch_kw = ["olustur", "calistir", "gonder", "gorev", "otomatik", "planla", "uretim", "icerik"]
+        action_kw = ["takip", "gonder", "mesaj", "yorum", "beğen", "paylas"]
+
+        need_action = any(kw in w for kw in action_kw for w in words)
+
+        return {
+            "need_persona": any(kw in w for kw in persona_kw for w in words),
+            "need_research": any(kw in w for kw in research_kw for w in words) or "analiz et" in intent_lower,
+            "need_orchestration": any(kw in w for kw in orch_kw for w in words) or "yap" in words,
+            "need_human_approval": need_action,  # Dış dünya aksiyonları için insan onayı gerekli
+            "steps": [
+                "observe",      # scrape
+                "analyze",      # behavioral signals
+                "verify",       # uncertainty check
+                "generate",     # strategy
+            ] + (["human_approval"] if need_action else []) + ["execute"],
+        }
+
     async def run_pipeline(
         self,
         intent: str,
@@ -286,6 +311,10 @@ class Orchestrator:
         record = self.register_task(task_id, intent)
         report: Dict[str, Any] = {"intent": intent, "target": target}
         try:
+            # 0. ROUTING PLAN
+            plan = self._plan(intent)
+            report["plan"] = plan
+
             # 1. INTENT & SCRAPE
             await self._step(record, "intent", "ok", f"Görev kaydedildi: {intent}")
             if target:
@@ -302,23 +331,45 @@ class Orchestrator:
                     try:
                         if self.analyzer:
                             analyzed_profile = await self.analyzer.analyze(scraped_data)
+
+                            # Adım 1: Uncertainty Feedback Loop (Otomatik Re-Scrape)
+                            # Check if the engine requests more data due to low confidence or weak evidence
+                            try:
+                                from services.uncertainty import evaluate_profile
+                                urgency_report = evaluate_profile(analyzed_profile)
+
+                                if urgency_report.collect_more_count > 0:
+                                    await self._step(record, "analyzer", "warning", f"Uncertainty Engine uyarisi: {urgency_report.collect_more_count} sinyal zayif. Oto-rescrape tetikleniyor...")
+                                    # Re-scrape with force_refresh to fetch new/more data (deep scrape)
+                                    scraped_data = await scrape_target(target, platform, force_refresh=True)
+                                    report["scraped_data_deep"] = scraped_data
+                                    await self._step(record, "scraper", "ok", f"Hedef derinlemesine tarandı: {target}")
+                                    # Re-analyze
+                                    analyzed_profile = await self.analyzer.analyze(scraped_data)
+                                    await self._step(record, "analyzer", "ok", "İkinci analiz tamamlandı.")
+                            except Exception as exc:
+                                logger.warning("Uncertainty Engine oto-rescrape hatasi: %s", exc)
+
                             analyzed_profile["username"] = scraped_data.get("username")
                             analyzed_profile["platform"] = scraped_data.get("platform")
                             report["analyzed_profile"] = analyzed_profile
                             confidence = analyzed_profile.get("overall_confidence", 0.0)
-
-                            # Memory Policy & Delta tracking
-                            if self.memory:
-                                mem_res = self.memory.process_profile(
-                                    analyzed_profile.get("platform", "unknown"),
-                                    analyzed_profile.get("username", "unknown"),
-                                    analyzed_profile
-                                )
-                                report["memory_delta"] = mem_res
-                                await self._step(record, "memory", "ok", f"Memory işlendi: {mem_res.get('status')}")
-
                             await self._step(record, "analyzer", "ok",
                                              f"Sinyal cikarimi tamamlandi: guven={confidence:.2f}")
+
+                            # MemoryDelta — profili history'ye kaydet
+                            try:
+                                delta = record_profile(analyzed_profile)
+                                if delta:
+                                    report["memory_delta"] = {
+                                        "changed_fields": delta.changed_fields,
+                                        "reason": delta.reason,
+                                    }
+                                    await self._step(record, "memory", "ok", f"Delta kaydedildi: {delta.reason}")
+                                else:
+                                    await self._step(record, "memory", "ok", "Ilk kayit, delta yok")
+                            except Exception as exc:
+                                logger.warning("MemoryDelta hatasi: %s", exc)
                         else:
                             report["analyzed_profile"] = None
                             await self._step(record, "analyzer", "unavailable", "Profil analiz servisi yapilandirilmamis")
@@ -347,6 +398,37 @@ class Orchestrator:
                                 cv = graph_result.get("compatibility", {})
                                 await self._step(record, "resonance_engine", "ok",
                                                  f"Rezonans: composite={cv.get('composite', 0):.2f}, strateji={graph_result.get('strategy')}")
+
+                                # COLLECT_MORE döngüsü — yeniden scrape + analyze + Resonance tekrar
+                                uncertainty = graph_result.get("uncertainty") or {}
+                                if uncertainty.get("collect_more_count", 0) > 0:
+                                    try:
+                                        logger.info("COLLECT_MORE tetiklendi — yeniden scrape + analyze + Resonance: %s", target)
+                                        scraped_retry = await scrape_target(target, platform, force_refresh=True)
+                                        retry_profile = await self.analyzer.analyze(scraped_retry)
+                                        retry_profile["username"] = scraped_retry.get("username")
+                                        retry_profile["platform"] = scraped_retry.get("platform")
+
+                                        # Yeniden Resonance Engine'e gönder
+                                        initial_state_retry = {
+                                            "profile": retry_profile,
+                                            "score": 0.0,
+                                            "strategy": "",
+                                            "messages_sent": 0,
+                                            "handover_ready": False,
+                                            "status": "init",
+                                            "cookies": cookies,
+                                        }
+                                        graph_result_retry = await self.resonance_graph.ainvoke(initial_state_retry)
+                                        report["resonance_engine_retry"] = graph_result_retry
+
+                                        await self._step(record, "scraper_retry", "ok",
+                                                         f"COLLECT_MORE: retry + Resonance tamamlandi, guven={retry_profile.get('overall_confidence', 0):.2f}")
+                                    except Exception as exc:
+                                        logger.warning("COLLECT_MORE retry basarisiz: %s", exc)
+                                        report["retry_status"] = "failed"
+                                else:
+                                    report["retry_status"] = "not_needed"
                             except Exception as exc:
                                 report["resonance_engine"] = None
                                 await self._step(record, "resonance_engine", "failed", f"Rezonans motoru hatası: {exc}")
@@ -362,75 +444,77 @@ class Orchestrator:
                     report["analyzed_profile"] = None
                     await self._step(record, "scraper", "failed", f"Tarama yapılamadı: {exc}")
 
-            # 2. ELIZA — persona bağlamı
-            room = target or intent[:40]
-            eliza = self.registry.get(IPersona)
-            if eliza:
-                try:
-                    ctx = await eliza.get_context(room)
-                    report["eliza_context"] = ctx
-                    await self._step(record, "eliza", "ok",
-                                     f"Persona hafızası okundu (room={room}, {len(ctx)} karakter)")
-                except Exception as exc:
+            # 2. ELIZA — persona bağlamı (sadece plan gerektiriyorsa)
+            if plan["need_persona"]:
+                room = target or intent[:40]
+                if self.eliza:
+                    try:
+                        ctx = await self.eliza.recall(room)
+                        report["eliza_context"] = ctx
+                        await self._step(record, "eliza", "ok",
+                                         f"Persona hafızası okundu (room={room}, {len(ctx)} karakter)")
+                    except Exception as exc:
+                        report["eliza_context"] = None
+                        await self._step(record, "eliza", "unavailable", f"Eliza erişilemedi: {exc}")
+                else:
                     report["eliza_context"] = None
-                    await self._step(record, "eliza", "unavailable", f"Eliza erişilemedi: {exc}")
+                    await self._step(record, "eliza", "skipped", "Persona servisi yapilandirilmamis")
             else:
                 report["eliza_context"] = None
-                await self._step(record, "eliza", "unavailable", "Persona servisi yapilandirilmamis")
+                await self._step(record, "eliza", "skipped", "Plan gerektirmiyor")
 
-            # 3. DEER-FLOW — uzun bağlamlı analiz
-            df = self.registry.get(IDeepResearch)
-            if df:
-                query = f"Kültürel frekans analizi hedefi: {target or intent}"
-                try:
-                    research = await df.research(query, {"assistant_id": self.settings.deerflow_assistant_id})
-                    report["research"] = research
-                    await self._step(record, "deerflow", "ok",
-                                     f"Derin analiz tamamlandı (thread={research.get('thread_id')})")
-                except Exception as exc:
+            # 3. DEER-FLOW — uzun bağlamlı analiz (sadece plan gerektiriyorsa)
+            if plan["need_research"]:
+                if self.df:
+                    query = f"Kültürel frekans analizi hedefi: {target or intent}"
+                    try:
+                        research = await self.df.run_research(query, self.settings.deerflow_assistant_id)
+                        report["research"] = research
+                        await self._step(record, "deerflow", "ok",
+                                         f"Derin analiz tamamlandı (thread={research.get('thread_id')})")
+                    except Exception as exc:
+                        report["research"] = None
+                        await self._step(record, "deerflow", "unavailable", f"Deer-Flow erişilemedi: {exc}")
+                else:
                     report["research"] = None
-                    await self._step(record, "deerflow", "unavailable", f"Deer-Flow erişilemedi: {exc}")
+                    await self._step(record, "deerflow", "skipped", "Derin analiz servisi yapilandirilmamis")
             else:
                 report["research"] = None
-                await self._step(record, "deerflow", "unavailable", "Derin analiz servisi yapilandirilmamis")
+                await self._step(record, "deerflow", "skipped", "Plan gerektirmiyor")
 
-            # 4. AGENT-ZERO — ana orkestratöre emir (iç alt-ajanları o yönetir)
-            az = self.registry.get(ICodeExecution)
-            if az:
-                command = (
-                    f"Yeni görev. Niyet: {intent}\n"
-                    f"Hedef: {target or 'belirtilmedi'}\n"
-                    f"Derin analiz raporu: {str(report.get('research'))[:800]}\n"
-                    f"Persona bağlamı: {str(report.get('eliza_context'))[:400]}\n"
-                    "Bu görev için gerekli alt-ajanları dinamik olarak oluştur, işi "
-                    "yürüt ve tamamlanınca sonlandır. Sonucu raporla."
-                )
-                try:
-                    az_result = await az.execute(command, {"agent_profile": "default"})
-                    report["agent_zero"] = az_result
-                    await self._step(record, "agent_zero", "ok",
-                                     f"Orkestrasyon yanıtı alındı (context={az_result.get('context_id')})")
-                except Exception as exc:
+            # 4. AGENT-ZERO — ana orkestratöre emir (sadece plan gerektiriyorsa)
+            if plan["need_orchestration"]:
+                if self.az:
+                    command = (
+                        f"Yeni görev. Niyet: {intent}\n"
+                        f"Hedef: {target or 'belirtilmedi'}\n"
+                        f"Derin analiz raporu: {str(report.get('research'))[:800]}\n"
+                        f"Persona bağlamı: {str(report.get('eliza_context'))[:400]}\n"
+                        "Bu görev için gerekli alt-ajanları dinamik olarak oluştur, işi "
+                        "yürüt ve tamamlanınca sonlandır. Sonucu raporla."
+                    )
+                    try:
+                        az_result = await self.az.send_message(command, agent_profile="default")
+                        report["agent_zero"] = az_result
+                        await self._step(record, "agent_zero", "ok",
+                                         f"Orkestrasyon yanıtı alındı (context={az_result.get('context_id')})")
+                    except Exception as exc:
+                        report["agent_zero"] = None
+                        await self._step(record, "agent_zero", "unavailable", f"Agent-Zero erişilemedi: {exc}")
+                else:
                     report["agent_zero"] = None
-                    await self._step(record, "agent_zero", "unavailable", f"Agent-Zero erişilemedi: {exc}")
+                    await self._step(record, "agent_zero", "skipped", "Agent orkestratoru yapilandirilmamis")
             else:
                 report["agent_zero"] = None
-                await self._step(record, "agent_zero", "unavailable", "Agent orkestratoru yapilandirilmamis")
+                await self._step(record, "agent_zero", "skipped", "Plan gerektirmiyor")
 
             # 5. UI-TARS — piksel tabanlı görsel görev
             if visual_task:
-                # Let's see if we have a vision capability registered, or fallback to direct instantiation
-                vision = self.registry.get(IVision)
-                if not vision:
-                    # Do not register stateful instances globally.
-                    # In a true factory pattern, the registry would yield a new instance.
-                    # For now, just instantiate and use directly.
+                try:
                     operator = PlaywrightOperator(start_url=target or "https://example.com")
                     model = UITarsModelClient(self.settings.uitars_remote_endpoint)
-                    vision = GUIAgent(operator, model, visual_task)
-
-                try:
-                    uitars_result = await vision.run_visual_task(target or "https://example.com", visual_task)
+                    agent = GUIAgent(operator, model, visual_task)
+                    uitars_result = await agent.run()
                     report["uitars"] = uitars_result
                     await self._step(record, "uitars", "ok",
                                      f"Görsel görev tamamlandı (adım {uitars_result.get('step')})")
@@ -454,24 +538,84 @@ class Orchestrator:
                     await self._step(record, "session", "unavailable", f"Oturum deposu hatası: {exc}")
                     report["session"] = {"loaded": False, "error": str(exc)}
 
-            # 7. FINISH
-            record["status"] = "finished"
-            record["result"] = report
-            await self._step(record, "finish", "ok", "Görev tamamlandı")
+            # 7. VALIDATION — görev başarısını doğrula
+            validation_status = self._validate_task_completion(record, report)
+            record["validation_status"] = validation_status
+
+            # 8. FINISH — gerçek duruma göre set et
+            if validation_status == "SUCCESS":
+                record["status"] = "success"
+                await self._step(record, "finish", "ok", "Görev başarıyla tamamlandı")
+            elif validation_status == "PARTIAL":
+                record["status"] = "partial"
+                await self._step(record, "finish", "ok", "Görev kısmen tamamlandı")
+            elif validation_status == "NEEDS_HUMAN":
+                record["status"] = "blocked"
+                await self._step(record, "finish", "blocked", "İnsan onayı bekliyor")
+            else:  # FAILED
+                record["status"] = "failed"
+                await self._step(record, "finish", "failed", "Görev doğrulama başarısız")
         except Exception as exc:
             record["status"] = "failed"
             record["error"] = str(exc)
+            record["validation_status"] = "FAILED"
             logger.exception("[%s] görev başarısız", task_id)
             await self._step(record, "finish", "failed", f"Hata: {exc}")
         finally:
             record["finished_at"] = datetime.now(timezone.utc).isoformat()
         return record
 
+    def _validate_task_completion(self, record: Dict[str, Any], report: Dict[str, Any]) -> str:
+        """Görev başarısını doğrula: SUCCESS, PARTIAL, FAILED, NEEDS_HUMAN.
+
+        'finished' artık yalnızca gerçekten doğrulanmış başarıda kullanılır.
+        """
+        steps = record.get("steps", [])
+        step_statuses = [s.get("status") for s in steps]
+
+        # Kritik adımların başarısını kontrol et
+        critical_failed = any(
+            s.get("status") == "failed"
+            for s in steps
+            if s.get("step") in ("analyzer", "resonance_engine", "scraper")
+        )
+
+        if critical_failed:
+            return "FAILED"
+
+        # Resonance Engine sonucu var mı?
+        resonance = report.get("resonance_engine_retry") or report.get("resonance_engine")
+        if resonance:
+            uncertainty = resonance.get("uncertainty") or {}
+            flagged_count = uncertainty.get("flagged_count", 0)
+
+            # FLAG çok yüksekse insan onayı gerekli
+            if flagged_count > 3:
+                return "NEEDS_HUMAN"
+
+            # Handover ready mi?
+            if resonance.get("handover_ready"):
+                return "SUCCESS"
+
+            # Strategy belirlenmişse en azından partial
+            if resonance.get("strategy"):
+                return "PARTIAL"
+
+        # Analyzer çalıştıysa ve sonuç ürettiyse partial
+        if report.get("analyzed_profile"):
+            return "PARTIAL"
+
+        # Hiçbir kritik adım başarısız değil ama sonuç da yok
+        if all(s.get("status") in ("ok", "skipped", "unavailable") for s in steps):
+            return "PARTIAL"
+
+        return "FAILED"
+
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
-        return self._tasks.get(task_id)
+        return self.task_store.get_task(task_id)
 
     def list_tasks(self) -> Dict[str, Dict[str, Any]]:
-        return dict(self._tasks)
+        return self.task_store.list_tasks()
 
     async def health_async(self) -> Dict[str, bool]:
         return await self._service_health()

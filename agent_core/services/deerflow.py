@@ -25,12 +25,7 @@ class DeerFlowError(RuntimeError):
     pass
 
 
-from services.registry import IDeepResearch
-
-class DeerFlowClient(IDeepResearch):
-    async def research(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        assistant_id = context.get("assistant_id") if context else None
-        return await self.run_research(query, assistant_id=assistant_id)
+class DeerFlowClient:
     def __init__(self, base_url: str, timeout: float = 300.0, max_retries: int = 3):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout

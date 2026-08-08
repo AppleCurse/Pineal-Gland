@@ -12,7 +12,6 @@ class MemoryManager:
     Responsibilities:
     1. Write Policy: Decides whether a new profile should be saved based on confidence/stability.
     2. Delta Tracking: Compares a new profile to the last saved one and records differences.
-    3. Semantic Graph Preparation: Formats memory queries for reasoning/planning.
     """
 
     def __init__(self, data_dir: str = "./data"):
@@ -133,32 +132,3 @@ class MemoryManager:
                 }
 
         return delta
-
-    def get_behavioral_evolution(self, platform: str, username: str) -> Optional[Dict[str, Any]]:
-        """Provides a timeline of how the user's behavior has evolved.
-        This prepares the memory system to act as a semantic graph node for the Planner.
-        """
-        key = f"{platform}:{username.lower()}"
-        memory = self._load()
-        history = memory.get(key, [])
-
-        if not history:
-            return None
-
-        evolution = {
-            "entity": key,
-            "observations_count": len(history),
-            "first_seen": history[0]["timestamp"],
-            "last_seen": history[-1]["timestamp"],
-            "significant_shifts": []
-        }
-
-        for record in history:
-            if record.get("delta") and record["delta"].get("changed_fields"):
-                evolution["significant_shifts"].append({
-                    "timestamp": record["timestamp"],
-                    "changes": record["delta"]["changed_fields"],
-                    "details": record["delta"]["details"]
-                })
-
-        return evolution

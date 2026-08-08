@@ -193,6 +193,8 @@ async def strategize_node(state: ResonanceState) -> ResonanceState:
 async def act_node(state: ResonanceState) -> ResonanceState:
     logger.info(f"act_node: Aksiyon aliniyor (Strateji: {state.get('strategy')})")
 
+    # HUMAN APPROVAL BOUNDARY — README ile kodu hizala
+    # Otomatik mesaj gönderme YOK — sadece insan onayiyla
     if state.get("strategy") == "direct_engagement":
         cookies = state.get("cookies", [])
         profile = state.get("profile", {})
@@ -202,24 +204,28 @@ async def act_node(state: ResonanceState) -> ResonanceState:
         tone = _get_tone(profile)
 
         if username and cookies:
-            agent = InteractionAgent()
-            try:
-                await agent.start(cookies=cookies)
-                await agent.follow_user(platform, username)
+            # NOT: Gerçek human approval UI'dan gelmeli
+            # Şimdilik only log + handover_ready bayrağı set ediliyor
+            # Aksiyon Cockpit üzerinden insan onayıyla alınacak
+            logger.warning(
+                "act_node: Human approval gerekli — otomatik DM/follow ATLANDI. "
+                "Hedef: %s/%s, Strateji: %s",
+                platform, username, state.get("strategy")
+            )
 
-                themes_str = ", ".join(themes[:2]) if themes else "ortak ilgi alanlari"
-                message = (
+            # Handover ready olarak işaretle — Cockpit'e devredilecek
+            state["handover_ready"] = True
+            state["pending_action"] = {
+                "type": "direct_engagement",
+                "platform": platform,
+                "username": username,
+                "message_template": (
                     f"Merhaba. Profilini inceledim ve {tone} iletisim tarzin "
-                    f"ilgimi cekti. Ozellikle {themes_str} konularinda benzer dusunuyoruz."
-                )
-
-                dm_result = await agent.send_dm(platform, username, message)
-                if dm_result.get("status") == "ok":
-                    state["messages_sent"] = state.get("messages_sent", 0) + 1
-            except Exception as e:
-                logger.error(f"InteractionAgent hatasi: {e}")
-            finally:
-                await agent.close()
+                    f"ilgimi cekti. Ozellikle {', '.join(themes[:2]) if themes else 'ortak ilgi alanlari'} "
+                    f"konusunda benzer dusunuyoruz."
+                ),
+                "requires_approval": True,
+            }
         else:
             logger.warning("Username veya cookies eksik, InteractionAgent atlaniyor.")
 

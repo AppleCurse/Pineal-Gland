@@ -77,6 +77,24 @@ def _load_cache() -> Dict[str, Any]:
     return {}
 
 
+def _is_stale(entry: Dict[str, Any], ttl_seconds: float = 86400.0) -> bool:
+    """scraped_at timestamp'ine bakarak cache girdisinin eski olup olmadigini kontrol eder.
+
+    TTL default: 24 saat.
+    Entry'da scraped_at yoksa eski kabul edilir (bos veya corrupted cache'den kurtulmak icin).
+    """
+    scraped_at_str = entry.get("scraped_at")
+    if not scraped_at_str:
+        return True  # timestamp yoksa yeniden cek
+    try:
+        from datetime import datetime, timezone
+        scraped = datetime.fromisoformat(scraped_at_str.replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - scraped).total_seconds()
+        return age > ttl_seconds
+    except (ValueError, TypeError):
+        return True  # parse edilemiyorsa eski kabul et, yeniden cek
+
+
 def _save_cache(cache: Dict[str, Any]) -> None:
     try:
         CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -254,23 +272,11 @@ async def scrape_target(
     cache = _load_cache()
 
     if not force_refresh and cache_key in cache:
-        cached_data = cache[cache_key]
-        scraped_at_str = cached_data.get("scraped_at")
-        if scraped_at_str:
-            try:
-                scraped_at = datetime.fromisoformat(scraped_at_str)
-                now = datetime.now(timezone.utc)
-                diff = now - scraped_at
-                # TTL: 24 hours
-                if diff.total_seconds() < 24 * 3600:
-                    logger.info("Önbellekten döndü (TTL gecerli): %s", cache_key)
-                    return cached_data
-                else:
-                    logger.info("Önbellek süresi dolmuş (TTL > 24h), yeniden çekiliyor: %s", cache_key)
-            except Exception as e:
-                logger.warning("scraped_at okuma hatası (%s), yeniden çekiliyor: %s", e, cache_key)
-        else:
-            logger.info("scraped_at bulunamadı, yeniden çekiliyor: %s", cache_key)
+        entry = cache[cache_key]
+        if not _is_stale(entry):
+            logger.info("Önbellekten döndü (taze): %s", cache_key)
+            return entry
+        logger.info("Önbellek eski (TTL aştı): %s — yeniden cekiliyor", cache_key)
 
     # Playwright stealth ile çek
     async with async_playwright() as p:
