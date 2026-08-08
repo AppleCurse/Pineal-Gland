@@ -27,6 +27,7 @@ from config import Settings
 from services.agent_zero import AgentZeroClient
 from services.deerflow import DeerFlowClient
 from services.eliza import ElizaClient
+from services.canonical_memory import get_canonical_memory
 from services.handover import FrequencyLimiter, CockpitHandover
 from services.scraper import scrape_target
 from services.session_store import SessionStore
