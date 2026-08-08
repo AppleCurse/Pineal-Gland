@@ -27,7 +27,7 @@ from config import Settings
 from services.agent_zero import AgentZeroClient
 from services.deerflow import DeerFlowClient
 from services.eliza import ElizaClient
-from services.canonical_memory import get_canonical_memory
+from services.canonical_memory import get_canonical_memory, CanonicalMemoryAdapter
 from services.handover import FrequencyLimiter, CockpitHandover
 from services.scraper import scrape_target
 from services.session_store import SessionStore
@@ -352,6 +352,21 @@ class Orchestrator:
                                     await self._step(record, "memory", "ok", "Ilk kayit, delta yok")
                             except Exception as exc:
                                 logger.warning("MemoryDelta hatasi: %s", exc)
+                            
+                            # Canonical Memory — tekil memory sistemine de kaydet
+                            try:
+                                canonical = get_canonical_memory()
+                                result = canonical.store_profile(
+                                    platform=platform or "unknown",
+                                    username=target.split("/")[-1] if target else "unknown",
+                                    profile=analyzed_profile,
+                                    source="orchestrator"
+                                )
+                                report["canonical_memory"] = result
+                                logger.info(f"Canonical memory: {result['status']} - {result.get('key', 'N/A')}")
+                            except Exception as exc:
+                                logger.warning("Canonical Memory hatasi: %s", exc)
+                                report["canonical_memory_error"] = str(exc)
                         else:
                             report["analyzed_profile"] = None
                             await self._step(record, "analyzer", "unavailable", "Profil analiz servisi yapilandirilmamis")

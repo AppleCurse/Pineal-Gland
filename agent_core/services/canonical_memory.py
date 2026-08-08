@@ -16,9 +16,11 @@ Tüm memory işlemleri bu adapter üzerinden geçer:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
