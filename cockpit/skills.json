@@ -1,0 +1,60 @@
+{
+  "skills": [
+    {
+      "id": "scout",
+      "name": "Keşif & Tarama",
+      "icon": "🔍",
+      "active": true,
+      "description": "Instagram/X üzerinde profilleri tara"
+    },
+    {
+      "id": "vision",
+      "name": "Görsel Analiz",
+      "icon": "👁️",
+      "active": true,
+      "description": "Fotoğraf estetiği, renk paleti, mekân kalitesi"
+    },
+    {
+      "id": "psych",
+      "name": "Davranış Sinyali",
+      "icon": "🧠",
+      "active": true,
+      "description": "Metin/görsel sinyallerinden olasılıksal profil"
+    },
+    {
+      "id": "icebreaker",
+      "name": "Buz Kırıcı",
+      "icon": "💬",
+      "active": true,
+      "description": "Hedefe özel ilk mesaj üretimi"
+    },
+    {
+      "id": "warmup",
+      "name": "Isıtma & Diyalog",
+      "icon": "🔥",
+      "active": false,
+      "description": "Sohbeti ilerlet, frekansı ölç"
+    },
+    {
+      "id": "handover",
+      "name": "Devir",
+      "icon": "🔔",
+      "active": true,
+      "description": "Frekans yakalanınca Mösyö'ye bildir"
+    },
+    {
+      "id": "memory",
+      "name": "Kalıcı Hafıza",
+      "icon": "💾",
+      "active": true,
+      "description": "Profilleri ve diyalogları hatırla"
+    },
+    {
+      "id": "stealth",
+      "name": "Gizli Mod",
+      "icon": "🕶️",
+      "active": true,
+      "description": "İnsan davranışı taklidi, hız sınırı"
+    }
+  ]
+}

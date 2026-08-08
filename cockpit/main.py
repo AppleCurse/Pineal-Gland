@@ -10,6 +10,7 @@ Calistirma:
     python main.py          -> http://localhost:5050
 """
 from __future__ import annotations
+import logging
 
 import asyncio
 import json
@@ -34,10 +35,10 @@ try:
     load_dotenv()
 except Exception:  # python-dotenv yoksa sorun degil
     pass
-
+logger = logging.getLogger("cockpit")
 try:
     import httpx
-except Exception:  # httpx yoksa LLM entegrasyonu pasif kalir
+except Exception:
     httpx = None
 
 from browser_agent import browser
@@ -49,6 +50,9 @@ PERSONALITY_FILE = BASE_DIR / "personality.json"
 SKILLS_FILE = BASE_DIR / "skills.json"
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
+# Agent Core LLM Gateway bridge'i kullan (merkezi routing, fallback, cost tracking)
+LLM_BRIDGE_URL = os.getenv("LLM_BRIDGE_URL", "http://127.0.0.1:5051")
 
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-5")
 
@@ -323,9 +327,42 @@ agent = AgentState()
 
 
 # ---------------------------------------------------------------------------
-# Opsiyonel LLM (OpenRouter). API anahtari yoksa basit yerel yanitlayici.
+# LLM Bridge Client — Agent Core LLMGateway'e yonlendirir
 # ---------------------------------------------------------------------------
-async def llm_respond(system_prompt: str, user_message: str) -> Optional[str]:
+async def llm_respond(system_prompt: str, user_message: str, model: Optional[str] = None) -> Optional[str]:
+    """Cockpit LLM cagrisini Agent Core LLM Bridge uzerinden yapar."""
+    if httpx is None:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{LLM_BRIDGE_URL}/chat",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "system_prompt": system_prompt,
+                    "user_message": user_message,
+                    "model": model or OPENROUTER_MODEL,
+                    "temperature": 0.2,
+                    "max_tokens": 1024,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("success"):
+                return data["content"]
+            else:
+                logger.warning(f"LLM Bridge error: {data.get('error')}")
+                return None
+    except Exception as exc:
+        logger.error(f"LLM Bridge call failed: {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Opsiyonel LLM (OpenRouter - FALLBACK). API anahtari yoksa basit yerel yanitlayici.
+# ---------------------------------------------------------------------------
+async def llm_respond_direct(system_prompt: str, user_message: str) -> Optional[str]:
+    """Dogrudan OpenRouter cagrisi (LLM Bridge kullanilmaz, fallback olarak)."""
     if not OPENROUTER_API_KEY or httpx is None:
         return None
     try:
@@ -426,8 +463,44 @@ exact olarak su JSON formatinda ciktı uret. Baska hicbir sey yazma, sadece gece
 
 
 async def generate_mission_brief_inline(intent: str) -> Optional[Dict[str, Any]]:
-    """OpenRouter'a direkt cagri yaparak MissionBrief JSON uretir."""
-    if not httpx:
+    """LLM Bridge uzerinden MissionBrief JSON uretir (fallback: direkt OpenRouter)."""
+    # Once LLM Bridge dene
+    if httpx:
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.post(
+                    f"{LLM_BRIDGE_URL}/chat",
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "system_prompt": MISSION_BRIEF_SYSTEM_PROMPT,
+                        "user_message": f"Analiz et ve MissionBrief uret: {intent}",
+                        "model": OPENROUTER_MODEL,
+                        "temperature": 0.3,
+                        "max_tokens": 1024,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("success"):
+                    raw = data["content"]
+                    m = re.search(r"\{.*\}", raw, re.DOTALL)
+                    parsed = json.loads(m.group(0) if m else raw)
+                    parsed["raw_input"] = intent
+                    parsed["generated_at"] = datetime.now().isoformat()
+                    parsed["_model_used"] = data.get("model_used", OPENROUTER_MODEL)
+                    parsed["_via_bridge"] = True
+                    MISSION_BRIEF_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    MISSION_BRIEF_FILE.write_text(
+                        json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    return parsed
+                else:
+                    logger.warning(f"LLM Bridge baseline basarisiz: {data.get('error')}")
+        except Exception as exc:
+            logger.error(f"LLM Bridge ile MissionBrief hatasi: {exc}. Fallback deneniyor...")
+    
+    # Fallback: direkt OpenRouter
+    if not OPENROUTER_API_KEY or httpx is None:
         return None
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
@@ -451,12 +524,12 @@ async def generate_mission_brief_inline(intent: str) -> Optional[Dict[str, Any]]
             )
             resp.raise_for_status()
             raw = resp.json()["choices"][0]["message"]["content"]
-            # JSON blogu cıkar
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             parsed = json.loads(m.group(0) if m else raw)
             parsed["raw_input"] = intent
             parsed["generated_at"] = datetime.now().isoformat()
-            # Dosyaya kaydet (agent_core ile paylasilir)
+            parsed["_model_used"] = OPENROUTER_MODEL
+            parsed["_via_bridge"] = False
             MISSION_BRIEF_FILE.parent.mkdir(parents=True, exist_ok=True)
             MISSION_BRIEF_FILE.write_text(
                 json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8"
