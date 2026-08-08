@@ -15,10 +15,12 @@ Yarin Agent-Zero yerine baska orchestrator takmak tek satir degisikliktir.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional, Protocol
 
 from config import Settings
@@ -35,6 +37,70 @@ from services.memory_delta import record_profile
 from resonance_graph import create_resonance_graph
 
 logger = logging.getLogger("agent_core.orchestrator")
+
+
+# ---------------------------------------------------------------------------
+# Task State Persistence — RAM'den kalıcı depolamaya geçiş
+# ---------------------------------------------------------------------------
+
+class TaskStateStore:
+    """Task state'leri kalıcı olarak saklar (JSON dosya).
+    
+    Process restart sonrası task history kaybolmaz.
+    """
+    
+    def __init__(self, storage_path: str = "./data/task_state.json"):
+        self.storage_path = Path(storage_path)
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = asyncio.Lock()
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._load_from_disk()
+    
+    def _load_from_disk(self) -> None:
+        """Diskten state yükle."""
+        if self.storage_path.exists():
+            try:
+                with open(self.storage_path, "r", encoding="utf-8") as f:
+                    self._cache = json.load(f)
+                logger.info("Task state store yüklendi: %d task", len(self._cache))
+            except Exception as exc:
+                logger.warning("Task state load hatası: %s — boş cache ile başlıyor", exc)
+                self._cache = {}
+        else:
+            self._cache = {}
+    
+    async def save_to_disk(self) -> None:
+        """Cache'i diske yaz."""
+        async with self._lock:
+            try:
+                with open(self.storage_path, "w", encoding="utf-8") as f:
+                    json.dump(self._cache, f, indent=2, ensure_ascii=False)
+                logger.debug("Task state store kaydedildi: %d task", len(self._cache))
+            except Exception as exc:
+                logger.error("Task state save hatası: %s", exc)
+    
+    async def set_task(self, task_id: str, record: Dict[str, Any]) -> None:
+        """Task state güncelle ve diske yaz."""
+        async with self._lock:
+            self._cache[task_id] = record
+        await self.save_to_disk()
+    
+    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Task state oku."""
+        return self._cache.get(task_id)
+    
+    def list_tasks(self) -> Dict[str, Dict[str, Any]]:
+        """Tüm taskları listele."""
+        return dict(self._cache)
+    
+    async def delete_task(self, task_id: str) -> bool:
+        """Task sil."""
+        async with self._lock:
+            if task_id in self._cache:
+                del self._cache[task_id]
+                await self.save_to_disk()
+                return True
+        return False
 
 
 class OrchestratorError(RuntimeError):
@@ -148,11 +214,14 @@ class Orchestrator:
         self.limiter = FrequencyLimiter()
         self.handover = CockpitHandover()
         self.resonance_graph = create_resonance_graph()
-        self._tasks: Dict[str, Dict[str, Any]] = {}
+        
+        # Task State Persistence — RAM yerine kalıcı depolama
+        task_state_path = getattr(settings, 'task_state_path', './data/task_state.json')
+        self.task_store = TaskStateStore(task_state_path)
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
-    def register_task(self, task_id: str, intent: str) -> Dict[str, Any]:
+    async def register_task(self, task_id: str, intent: str) -> Dict[str, Any]:
         record = {
             "task_id": task_id,
             "intent": intent,
@@ -164,7 +233,7 @@ class Orchestrator:
             "error": None,
             "validation_status": None,  # SUCCESS, FAILED, PARTIAL, BLOCKED, NEEDS_HUMAN
         }
-        self._tasks[task_id] = record
+        await self.task_store.set_task(task_id, record)
         return record
 
     async def _step(self, record: Dict[str, Any], name: str, status: str, detail: str) -> None:
@@ -172,6 +241,8 @@ class Orchestrator:
                 "ts": datetime.now(timezone.utc).isoformat()}
         record["steps"].append(step)
         logger.info("[%s] %s -> %s: %s", record["task_id"], name, status, detail)
+        # Her adım sonrası state'i kalıcı hale getir
+        await self.task_store.set_task(record["task_id"], record)
 
     async def _service_health(self) -> Dict[str, bool]:
         result: Dict[str, bool] = {}
@@ -522,10 +593,10 @@ class Orchestrator:
         return "FAILED"
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
-        return self._tasks.get(task_id)
+        return self.task_store.get_task(task_id)
 
     def list_tasks(self) -> Dict[str, Dict[str, Any]]:
-        return dict(self._tasks)
+        return self.task_store.list_tasks()
 
     async def health_async(self) -> Dict[str, bool]:
         return await self._service_health()
