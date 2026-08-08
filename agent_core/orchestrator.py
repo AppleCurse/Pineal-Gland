@@ -1,16 +1,13 @@
-"""Kapalı devre orkestratörü.
+"""Kapalı devre orkestratör.
 
 Pipeline (her adım loglanır; servis ayakta değilse adım "unavailable" olarak
 işaretlenir ve sistem durmaz):
 
     1. INTENT     : görevin kaydı
-    2. ELIZA      : persona + RAG hafızasından hedef bağlamı çek
-    3. DEER-FLOW  : uzun bağlamlı derin analiz raporu üret
-    4. AGENT-ZERO : emri (rapor+bağlam ile) ana orkestratöre ilet; iç dinamik
-                    alt-ajanları o kendi yaratır
-    5. UI-TARS    : görsel görev verilmişse piksel tabanlı ajanı çalıştır
-    6. SESSION    : platform/hesap verilmişse şifreli oturumu kaydet/yenile
-    7. FINISH     : özet + sonuç döndür
+    2. PLAN       : routing + validation planı
+    3. EXECUTION  : servis çağrıları (Eliza, DeerFlow, Analyzer, Resonance)
+    4. VALIDATION : sonuç doğrulama (COLLECT_MORE döngüsü dahil)
+    5. SUCCESS/FAILED/PARTIAL : gerçek durum
 
 Dependency Injection: tüm servis istemcileri constructor'dan alinir.
 Yarin Agent-Zero yerine baska orchestrator takmak tek satir degisikliktir.
@@ -165,6 +162,7 @@ class Orchestrator:
             "finished_at": None,
             "result": None,
             "error": None,
+            "validation_status": None,  # SUCCESS, FAILED, PARTIAL, BLOCKED, NEEDS_HUMAN
         }
         self._tasks[task_id] = record
         return record
@@ -193,18 +191,40 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _plan(intent: str) -> Dict[str, bool]:
-        """Deterministic routing: hangi servisler calisacak? (LLM yok)"""
+    def _plan(intent: str) -> Dict[str, Any]:
+        """Deterministic routing + plan: hangi servisler calisacak? (LLM yok)
+        
+        Gerçek planlama adımları:
+        1. observe (scrape)
+        2. analyze (behavioral signals)
+        3. verify (uncertainty check)
+        4. research (opsiyonel, derin analiz)
+        5. generate (strategy)
+        6. human_approval (aksiyon öncesi)
+        
+        Bu sadece routing filtresi, gerçek Planner değil.
+        """
         intent_lower = (intent or "").lower()
         words = intent_lower.split()
         # Stem match: keyword herhangi bir kelimenin basinda/icinde var mi?
         persona_kw = ["konus", "etkiles", "cevapla", "sohbet", "mesaj", "yorum", "karsilik", "diyalog"]
         research_kw = ["arastir", "incele", "rapor", "karsilastir", "derinlemesine", "analiz"]
         orch_kw = ["olustur", "calistir", "gonder", "gorev", "otomatik", "planla", "uretim", "icerik"]
+        action_kw = ["takip", "gonder", "mesaj", "yorum", "beğen", "paylas"]
+        
+        need_action = any(kw in w for kw in action_kw for w in words)
+        
         return {
             "need_persona": any(kw in w for kw in persona_kw for w in words),
             "need_research": any(kw in w for kw in research_kw for w in words) or "analiz et" in intent_lower,
             "need_orchestration": any(kw in w for kw in orch_kw for w in words) or "yap" in words,
+            "need_human_approval": need_action,  # Dış dünya aksiyonları için insan onayı gerekli
+            "steps": [
+                "observe",      # scrape
+                "analyze",      # behavioral signals
+                "verify",       # uncertainty check
+                "generate",     # strategy
+            ] + (["human_approval"] if need_action else []) + ["execute"],
         }
 
     async def run_pipeline(
@@ -289,18 +309,31 @@ class Orchestrator:
                                 await self._step(record, "resonance_engine", "ok",
                                                  f"Rezonans: composite={cv.get('composite', 0):.2f}, strateji={graph_result.get('strategy')}")
 
-                                # COLLECT_MORE auto-retry (maksimum 1 ek deneme)
+                                # COLLECT_MORE döngüsü — yeniden scrape + analyze + Resonance tekrar
                                 uncertainty = graph_result.get("uncertainty") or {}
                                 if uncertainty.get("collect_more_count", 0) > 0:
                                     try:
-                                        logger.info("COLLECT_MORE tetiklendi — force_refresh ile yeniden scrape: %s", target)
+                                        logger.info("COLLECT_MORE tetiklendi — yeniden scrape + analyze + Resonance: %s", target)
                                         scraped_retry = await scrape_target(target, platform, force_refresh=True)
                                         retry_profile = await self.analyzer.analyze(scraped_retry)
                                         retry_profile["username"] = scraped_retry.get("username")
                                         retry_profile["platform"] = scraped_retry.get("platform")
-                                        report["analyzed_profile_retry"] = retry_profile
+                                        
+                                        # Yeniden Resonance Engine'e gönder
+                                        initial_state_retry = {
+                                            "profile": retry_profile,
+                                            "score": 0.0,
+                                            "strategy": "",
+                                            "messages_sent": 0,
+                                            "handover_ready": False,
+                                            "status": "init",
+                                            "cookies": cookies,
+                                        }
+                                        graph_result_retry = await self.resonance_graph.ainvoke(initial_state_retry)
+                                        report["resonance_engine_retry"] = graph_result_retry
+                                        
                                         await self._step(record, "scraper_retry", "ok",
-                                                         f"COLLECT_MORE: retry tamamlandi, guven={retry_profile.get('overall_confidence', 0):.2f}")
+                                                         f"COLLECT_MORE: retry + Resonance tamamlandi, guven={retry_profile.get('overall_confidence', 0):.2f}")
                                     except Exception as exc:
                                         logger.warning("COLLECT_MORE retry basarisiz: %s", exc)
                                         report["retry_status"] = "failed"
@@ -415,18 +448,78 @@ class Orchestrator:
                     await self._step(record, "session", "unavailable", f"Oturum deposu hatası: {exc}")
                     report["session"] = {"loaded": False, "error": str(exc)}
 
-            # 7. FINISH
-            record["status"] = "finished"
-            record["result"] = report
-            await self._step(record, "finish", "ok", "Görev tamamlandı")
+            # 7. VALIDATION — görev başarısını doğrula
+            validation_status = self._validate_task_completion(record, report)
+            record["validation_status"] = validation_status
+            
+            # 8. FINISH — gerçek duruma göre set et
+            if validation_status == "SUCCESS":
+                record["status"] = "success"
+                await self._step(record, "finish", "ok", "Görev başarıyla tamamlandı")
+            elif validation_status == "PARTIAL":
+                record["status"] = "partial"
+                await self._step(record, "finish", "ok", "Görev kısmen tamamlandı")
+            elif validation_status == "NEEDS_HUMAN":
+                record["status"] = "blocked"
+                await self._step(record, "finish", "blocked", "İnsan onayı bekliyor")
+            else:  # FAILED
+                record["status"] = "failed"
+                await self._step(record, "finish", "failed", "Görev doğrulama başarısız")
         except Exception as exc:
             record["status"] = "failed"
             record["error"] = str(exc)
+            record["validation_status"] = "FAILED"
             logger.exception("[%s] görev başarısız", task_id)
             await self._step(record, "finish", "failed", f"Hata: {exc}")
         finally:
             record["finished_at"] = datetime.now(timezone.utc).isoformat()
         return record
+
+    def _validate_task_completion(self, record: Dict[str, Any], report: Dict[str, Any]) -> str:
+        """Görev başarısını doğrula: SUCCESS, PARTIAL, FAILED, NEEDS_HUMAN.
+        
+        'finished' artık yalnızca gerçekten doğrulanmış başarıda kullanılır.
+        """
+        steps = record.get("steps", [])
+        step_statuses = [s.get("status") for s in steps]
+        
+        # Kritik adımların başarısını kontrol et
+        critical_failed = any(
+            s.get("status") == "failed" 
+            for s in steps 
+            if s.get("step") in ("analyzer", "resonance_engine", "scraper")
+        )
+        
+        if critical_failed:
+            return "FAILED"
+        
+        # Resonance Engine sonucu var mı?
+        resonance = report.get("resonance_engine_retry") or report.get("resonance_engine")
+        if resonance:
+            uncertainty = resonance.get("uncertainty") or {}
+            flagged_count = uncertainty.get("flagged_count", 0)
+            
+            # FLAG çok yüksekse insan onayı gerekli
+            if flagged_count > 3:
+                return "NEEDS_HUMAN"
+            
+            # Handover ready mi?
+            if resonance.get("handover_ready"):
+                return "SUCCESS"
+            
+            # Strategy belirlenmişse en azından partial
+            if resonance.get("strategy"):
+                return "PARTIAL"
+        
+        # Analyzer çalıştıysa ve sonuç ürettiyse partial
+        if report.get("analyzed_profile"):
+            return "PARTIAL"
+        
+        # Hiçbir kritik adım başarısız değil ama sonuç da yok
+        if all(s.get("status") in ("ok", "skipped", "unavailable") for s in steps):
+            return "PARTIAL"
+        
+        return "FAILED"
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         return self._tasks.get(task_id)
