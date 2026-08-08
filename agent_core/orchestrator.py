@@ -154,6 +154,9 @@ class Orchestrator:
         self._tasks: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
+        # Load tasks from disk
+        self._load_tasks()
+
     # ------------------------------------------------------------------
     def register_task(self, task_id: str, intent: str) -> Dict[str, Any]:
         record = {
@@ -226,6 +229,15 @@ class Orchestrator:
 
             # 1. INTENT & SCRAPE
             await self._step(record, "intent", "ok", f"Görev kaydedildi: {intent}")
+
+            # HUMAN APPROVAL BOUNDARY
+            action_kws = ["follow", "message", "send_dm", "comment", "post", "mesaj at", "takip et"]
+            if any(kw in intent.lower() for kw in action_kws):
+                record["status"] = "NEEDS_HUMAN"
+                await self._step(record, "human_approval", "blocked", "Dış dünya aksiyonu tespit edildi. İnsan onayı bekleniyor.")
+                # We stop the pipeline right here if an explicit action requires human oversight.
+                # In a fully realized event system, the pipeline would pause and wait for a callback.
+                return record
             if target:
                 report["target"] = target
                 # Frekans ve ısınma kontrolü
@@ -415,18 +427,54 @@ class Orchestrator:
                     await self._step(record, "session", "unavailable", f"Oturum deposu hatası: {exc}")
                     report["session"] = {"loaded": False, "error": str(exc)}
 
-            # 7. FINISH
-            record["status"] = "finished"
+            # 7. FINISH - Evaluate semantics based on step success
+            has_failures = any(step["status"] == "failed" for step in record["steps"])
+            has_unavailable = any(step["status"] == "unavailable" for step in record["steps"])
+
+            if has_failures:
+                record["status"] = "FAILED"
+                await self._step(record, "finish", "failed", "Görev hatalarla sonlandı")
+            elif has_unavailable:
+                record["status"] = "PARTIAL"
+                await self._step(record, "finish", "partial", "Görev kısmi başarıyla sonlandı (bazı servisler kapalıydı)")
+            elif record.get("status") == "NEEDS_HUMAN":
+                # Preserved if set by human approval boundary
+                await self._step(record, "finish", "blocked", "Görev insan onayı bekliyor")
+            else:
+                record["status"] = "SUCCESS"
+                await self._step(record, "finish", "ok", "Görev başarıyla tamamlandı")
+
             record["result"] = report
-            await self._step(record, "finish", "ok", "Görev tamamlandı")
+
         except Exception as exc:
-            record["status"] = "failed"
+            record["status"] = "FAILED"
             record["error"] = str(exc)
             logger.exception("[%s] görev başarısız", task_id)
-            await self._step(record, "finish", "failed", f"Hata: {exc}")
+            await self._step(record, "finish", "failed", f"Kritik Hata: {exc}")
         finally:
             record["finished_at"] = datetime.now(timezone.utc).isoformat()
         return record
+
+
+    def _load_tasks(self):
+        try:
+            if os.path.exists(TASKS_FILE):
+                with open(TASKS_FILE, "r") as f:
+                    self._tasks = json.load(f)
+            else:
+                os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
+                self._tasks = {}
+        except Exception as exc:
+            logger.error(f"Error loading tasks from disk: {exc}")
+            self._tasks = {}
+
+    def _save_tasks(self):
+        try:
+            os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
+            with open(TASKS_FILE, "w") as f:
+                json.dump(self._tasks, f, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            logger.error(f"Error saving tasks to disk: {exc}")
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         return self._tasks.get(task_id)
