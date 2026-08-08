@@ -23,7 +23,7 @@ logger = logging.getLogger("agent_core.uncertainty")
 # ---------------------------------------------------------------------------
 
 
-def _evidence_strength(evidence: List[str], sample_size: int) -> float:
+def _evidence_strength(evidence: List[Any], sample_size: int) -> float:
     """Evidence kalitesini 0-1 arasi skorlar.
 
     Kriterler:
@@ -37,20 +37,21 @@ def _evidence_strength(evidence: List[str], sample_size: int) -> float:
 
     specific_count = 0
     for e in evidence:
+        e_str = e.get("excerpt", str(e)) if isinstance(e, dict) else str(e)
         # Fraction pattern: "7/12", "3 of 8"
-        if re.search(r'\d+/\d+|\d+\s*of\s*\d+', e):
+        if re.search(r'\d+/\d+|\d+\s*of\s*\d+', e_str):
             specific_count += 1
         # Quoted text
-        elif '"' in e or "'" in e or '`' in e:
+        elif '"' in e_str or "'" in e_str or '`' in e_str:
             specific_count += 1
         # Percentage
-        elif re.search(r'\d+%', e):
+        elif re.search(r'\d+%', e_str):
             specific_count += 1
         # Contains a number AND is longer than 20 chars (not just "user 123")
-        elif re.search(r'\d+', e) and len(e) > 20:
+        elif re.search(r'\d+', e_str) and len(e_str) > 20:
             specific_count += 1
         # Contains observable detail keywords
-        elif any(kw in e.lower() for kw in ('daily', 'weekly', 'always', 'never', 'every', 'most', 'majority', 'minority', 'typically', 'usually')):
+        elif any(kw in e_str.lower() for kw in ('daily', 'weekly', 'always', 'never', 'every', 'most', 'majority', 'minority', 'typically', 'usually')):
             specific_count += 1
 
     specificity = specific_count / max(len(evidence), 1)
@@ -83,7 +84,7 @@ def evaluate_signal(
     name: str,
     confidence: float,
     stability: float,
-    evidence: List[str],
+    evidence: List[Any],
     sample_size: int,
 ) -> SignalVerdict:
     """Tek bir sinyal kategorisini degerlendirir."""

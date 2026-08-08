@@ -24,6 +24,13 @@ logger = logging.getLogger("agent_core.analyzer")
 # ---------------------------------------------------------------------------
 
 
+
+class Evidence(BaseModel):
+    """Specific observable evidence supporting a classification."""
+    excerpt: str = Field(..., description="The specific quote or observed detail (e.g. 'bio line: ...')")
+    source: str = Field(default="unknown", description="Where this was found (e.g., 'post', 'bio', 'reply')")
+    timestamp: Optional[str] = Field(default=None, description="ISO 8601 timestamp if applicable")
+
 class CommunicationSignals(BaseModel):
     """Gozlemlenebilir iletisim tarzi sinyalleri."""
 
@@ -39,7 +46,7 @@ class CommunicationSignals(BaseModel):
     )
     confidence: float = Field(..., ge=0.0, le=1.0, description="How certain the LLM is about this classification (0-1)")
     stability: float = Field(..., ge=0.0, le=1.0, description="How consistent this signal is across the sample (0-1). Low stability = based on few posts, may change.")
-    evidence: List[str] = Field(
+    evidence: List[Evidence] = Field(
         default_factory=list,
         description="Specific observable examples supporting this classification (e.g. '7/12 posts use ironic contrast', 'bio contains self-deprecating humor')",
     )
@@ -56,7 +63,7 @@ class TopicAffinity(BaseModel):
         ..., description="Overall emotional valence: positive, negative, neutral, mixed"
     )
     stability: float = Field(..., ge=0.0, le=1.0, description="How consistent themes are across the sample")
-    evidence: List[str] = Field(
+    evidence: List[Evidence] = Field(
         default_factory=list,
         description="Specific posts or bio snippets that support theme classification",
     )
@@ -76,7 +83,7 @@ class PostingPattern(BaseModel):
     )
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in this signal set (0-1)")
     stability: float = Field(..., ge=0.0, le=1.0, description="How consistent posting behavior is across the sample")
-    evidence: List[str] = Field(
+    evidence: List[Evidence] = Field(
         default_factory=list,
         description="Observed posting behaviors supporting this classification",
     )
@@ -96,7 +103,7 @@ class InteractionPattern(BaseModel):
     )
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in this signal set (0-1)")
     stability: float = Field(..., ge=0.0, le=1.0, description="How consistent interaction patterns are across the sample")
-    evidence: List[str] = Field(
+    evidence: List[Evidence] = Field(
         default_factory=list,
         description="Specific interaction examples observed in the data",
     )
@@ -138,9 +145,9 @@ For EVERY signal, return TWO scores:
     High stability = the pattern appears in most posts consistently.
     Low stability = the pattern appears in only 1-2 posts and may not hold.
 
-For EVERY signal, include "evidence": specific, quotable examples from the data
-that justify your classification. E.g. "5/10 posts mention AI/ML topics",
-"bio line: 'building the future of work'", "replies use irony in 6/8 exchanges".
+For EVERY signal, include "evidence" as a list of objects containing:
+  - "excerpt": The specific quote or observed detail.
+  - "source": Where you found it (e.g. "post", "bio", "reply").
 Evidence is NOT optional — every signal decision must be traceable to the source.
 
 For "sample_size": count all analyzed data points (posts + bio + interactions).

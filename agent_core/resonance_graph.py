@@ -273,15 +273,15 @@ def create_resonance_graph():
     graph_builder = StateGraph(ResonanceState)
 
     graph_builder.add_node("analyze", analyze_node)
-    graph_builder.add_node("score", score_node)
+
     graph_builder.add_node("strategize", strategize_node)
     graph_builder.add_node("act", act_node)
     graph_builder.add_node("evaluate", evaluate_node)
 
     graph_builder.set_entry_point("analyze")
 
-    graph_builder.add_edge("analyze", "score")
-    graph_builder.add_edge("score", "strategize")
+    graph_builder.add_edge("analyze", "strategize")
+
     graph_builder.add_edge("strategize", "act")
     graph_builder.add_edge("act", "evaluate")
 
