@@ -93,20 +93,6 @@ class CircuitBreaker:
 # ---------------------------------------------------------------------------
 
 
-class TokenBudget:
-    def __init__(self):
-        self._usage: Dict[str, Dict[str, int]] = {}
-
-    def add(self, model: str, prompt_tokens: int, completion_tokens: int):
-        if model not in self._usage:
-            self._usage[model] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        self._usage[model]["prompt_tokens"] += prompt_tokens
-        self._usage[model]["completion_tokens"] += completion_tokens
-        self._usage[model]["total_tokens"] += (prompt_tokens + completion_tokens)
-
-    def get_stats(self) -> Dict[str, Any]:
-        return self._usage
-
 class LLMGateway:
     """Tek duragin LLM cagri adaptoru.
 
@@ -137,10 +123,6 @@ class LLMGateway:
         self.max_retries = max_retries
         self.timeout = timeout
         self.cb = circuit_breaker or CircuitBreaker()
-        self.budget = TokenBudget()
-
-    def get_usage_stats(self) -> Dict[str, Any]:
-        return self.budget.get_stats()
 
     # -- raw chat ----------------------------------------------------------
     async def chat(
@@ -225,13 +207,6 @@ class LLMGateway:
                 )
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
-
-            usage = data.get("usage", {})
-            p_tokens = usage.get("prompt_tokens", 0)
-            c_tokens = usage.get("completion_tokens", 0)
-            if p_tokens > 0 or c_tokens > 0:
-                self.budget.add(model, p_tokens, c_tokens)
-
             logger.debug("LLM yanit alindi (model=%s, %d token)", model, len(content))
             return content
 
