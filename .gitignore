@@ -1,1 +1,28 @@
-Nothing should be ignored based on the provided file changes. The changes only include Python source files (.py) which are legitimate code files that should be tracked in version control. No build artifacts, dependencies, temporary files, or other ignorable items are present in the change list.
+```gitignore
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Dependencies
+.venv/
+venv/
+.env
+.env.local
+*.env.*
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# Editors
+.vscode/
+.idea/
+
+# Build artifacts
+dist/
+build/
+target/
+```
