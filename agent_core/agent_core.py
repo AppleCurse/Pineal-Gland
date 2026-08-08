@@ -165,25 +165,20 @@ async def list_tasks():
 @app.get("/health")
 async def health():
     services = await orch.health_async()
-    timestamp = datetime.now(timezone.utc).isoformat()
-
-    # CircuitBreaker durumu
-    llm_status: Dict[str, Any] = {"models": {}}
-    try:
-        from services.llm_gateway import get_llm_gateway
-        gw = get_llm_gateway()
-        cb = gw.cb
-        for model in [gw.model, gw.fallback_model]:
-            if model:
-                llm_status["models"][model] = cb.status(model)
-    except Exception as exc:
-        llm_status["error"] = str(exc)
-
+    llm_metrics = {}
+    if orch.analyzer and orch.analyzer.gateway:
+        gw = orch.analyzer.gateway
+        llm_metrics = {
+            "model": gw.model,
+            "fallback_model": gw.fallback_model,
+            "circuit_breaker": gw.cb.status(gw.model),
+            "usage": gw.get_usage_stats() if hasattr(gw, "get_usage_stats") else None
+        }
     return {
         "status": "alive",
-        "ts": timestamp,
+        "ts": datetime.now(timezone.utc).isoformat(),
         "services": services,
-        "llm_gateway": llm_status,
+        "llm_gateway": llm_metrics
     }
 
 
