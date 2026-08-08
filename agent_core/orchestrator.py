@@ -156,6 +156,80 @@ class Orchestrator:
         self._tasks: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
+        # Register Event Handlers
+        asyncio.create_task(self._register_event_handlers())
+
+    async def _register_event_handlers(self):
+        """Asynchronously register handlers to the event bus."""
+        await self.event_bus.subscribe("PROFILE_ANALYZED", self._handle_profile_analyzed)
+        await self.event_bus.subscribe("MEMORY_UPDATED", self._handle_memory_updated)
+
+    async def _handle_profile_analyzed(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Otonom tepki: Profil analiz edildiginde hafizayi (memory) guncelle."""
+        if not self.memory:
+            return
+
+        task_id = payload.get("task_id")
+        profile = payload.get("profile")
+        if not task_id or not profile:
+            return
+
+        mem_res = self.memory.process_profile(
+            profile.get("platform", "unknown"),
+            profile.get("username", "unknown"),
+            profile
+        )
+        logger.info(f"[{task_id}] Event handler tetiklendi (Memory islendi): {mem_res.get('status')}")
+
+        # Zincirleme otonomi
+        await self.event_bus.emit("MEMORY_UPDATED", {
+            "task_id": task_id,
+            "profile": profile,
+            "memory_delta": mem_res,
+            "account": payload.get("account"),
+            "platform": payload.get("platform")
+        })
+
+    async def _handle_memory_updated(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Otonom tepki: Hafiza guncellendiginde LangGraph rezonans motorunu tetikle."""
+        task_id = payload.get("task_id")
+        profile = payload.get("profile")
+        platform = payload.get("platform")
+        account = payload.get("account")
+
+        if not task_id or not profile:
+            return
+
+        try:
+            current_account = account or "default"
+            session_data = None
+            if platform and self.sessions:
+                session_data = self.sessions.load(platform, current_account)
+
+            cookies = session_data.get("cookies", []) if session_data else []
+
+            initial_state = {
+                "profile": profile,
+                "score": 0.0,
+                "strategy": "",
+                "messages_sent": 0,
+                "handover_ready": False,
+                "status": "init",
+                "cookies": cookies,
+            }
+            # Start resonance logic autonomously
+            graph_result = await self.resonance_graph.ainvoke(initial_state)
+            cv = graph_result.get("compatibility", {})
+            logger.info(f"[{task_id}] Otonom Rezonans islendi: composite={cv.get('composite', 0):.2f}, strateji={graph_result.get('strategy')}")
+
+            # Record status via task store
+            record = self.get_task(task_id)
+            if record:
+                await self._step(record, "resonance_engine", "ok", f"Rezonans otonom islendi: strateji={graph_result.get('strategy')}")
+
+        except Exception as exc:
+            logger.error(f"[{task_id}] Otonom Rezonans motoru hatasi: {exc}")
+
     # ------------------------------------------------------------------
     def register_task(self, task_id: str, intent: str) -> Dict[str, Any]:
         record = {
